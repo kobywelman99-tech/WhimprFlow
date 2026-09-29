@@ -107,7 +107,7 @@ final class FlowController {
             server?.send(BridgeMessage(.transcribing))
             Task {
                 do {
-                    let text = try await dictation.finishUtterance { [weak self] in
+                    let text = try await dictation.finishUtterance(source: .keyboard) { [weak self] in
                         self?.server?.send(BridgeMessage(.cleaning))
                     }
                     server?.send(BridgeMessage(.final, text: text))

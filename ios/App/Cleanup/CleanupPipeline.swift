@@ -104,23 +104,33 @@ final class CleanupPipeline {
     private let settings: CleanupSettings
     /// Dictionary entries relevant to an utterance, for the prompt.
     private let vocabulary: (String) -> [Vocab]
+    /// The learned description of how the user writes, if there's one yet.
+    private let styleSummary: () -> String?
     private let makeModel: (String) -> any CleanupModel
 
     init(
         settings: CleanupSettings,
         vocabulary: @escaping (String) -> [Vocab] = { _ in [] },
+        styleSummary: @escaping () -> String? = { nil },
         makeModel: @escaping (String) -> any CleanupModel = { AnthropicClient(apiKey: $0) }
     ) {
         self.settings = settings
         self.vocabulary = vocabulary
+        self.styleSummary = styleSummary
         self.makeModel = makeModel
+    }
+
+    /// The level a dictation with this override is cleaned at; nil when
+    /// cleanup is turned off.
+    func level(for override: Level?) -> Level? {
+        settings.enabled ? (override ?? settings.level) : nil
     }
 
     /// `level` overrides the default for one dictation (the keyboard's pill).
     func clean(_ raw: String, level override: Level? = nil) async -> CleanupResult {
         guard settings.enabled else { return CleanupResult(text: raw, cleaned: false) }
         let level = override ?? settings.level
-        let request = prepareCleanup(raw: raw, level: level, vocab: vocabulary(raw), appBundleId: nil, styleSummary: nil)
+        let request = prepareCleanup(raw: raw, level: level, vocab: vocabulary(raw), appBundleId: nil, styleSummary: styleSummary())
         if request.skipModel {
             return CleanupResult(text: request.fallback, cleaned: false)
         }

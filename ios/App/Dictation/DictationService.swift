@@ -46,6 +46,9 @@ final class DictationService {
 
     private let engine = SpeechEngine()
     private let cleanup: CleanupPipeline
+    private let history: DictationHistory?
+    /// Style learning: fed each dictation's raw words.
+    private let learn: (String) -> Void
     /// The dictionary's words, as hints for the speech recogniser.
     private let vocabulary: () -> [String]
     private let recorder = Recorder()
@@ -56,8 +59,15 @@ final class DictationService {
     /// The in-app button opened the session just for one dictation.
     private var endSessionAfterUtterance = false
 
-    init(cleanup: CleanupPipeline, vocabulary: @escaping () -> [String] = { [] }) {
+    init(
+        cleanup: CleanupPipeline,
+        history: DictationHistory? = nil,
+        learn: @escaping (String) -> Void = { _ in },
+        vocabulary: @escaping () -> [String] = { [] }
+    ) {
         self.cleanup = cleanup
+        self.history = history
+        self.learn = learn
         self.vocabulary = vocabulary
     }
 
@@ -166,7 +176,7 @@ final class DictationService {
 
     /// Stops listening and returns the final text, cleaned up if cleanup is
     /// on. `onCleaning` fires once the words are in and cleanup starts.
-    func finishUtterance(onCleaning: () -> Void = {}) async throws -> String {
+    func finishUtterance(source: DictationRecord.Source = .app, onCleaning: () -> Void = {}) async throws -> String {
         guard let utterance else { throw DictationError.notRecording }
         self.utterance = nil
         let stoppedAt = ContinuousClock.now
@@ -182,6 +192,17 @@ final class DictationService {
             phase = .cleaning
             onCleaning()
             let result = await cleanup.clean(raw, level: levelOverride)
+            history?.add(DictationRecord(
+                date: Date(),
+                raw: raw,
+                text: result.text,
+                source: source,
+                level: cleanup.level(for: levelOverride).map(DictationLevel.init),
+                cleaned: result.cleaned
+            ))
+            // Learn from what was said, not the cleaned text: the point is
+            // how Koby talks, not how Claude rewrote it.
+            learn(raw)
             transcript = result.text
             lastCleanup = result
             let latency = ContinuousClock.now - stoppedAt

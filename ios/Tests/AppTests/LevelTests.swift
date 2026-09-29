@@ -74,6 +74,16 @@ final class LevelOverrideTests: XCTestCase {
         XCTAssertTrue(model.sentSystems.isEmpty)
     }
 
+    func testLevelUsedForHistory() throws {
+        let keychain = KeychainStore(service: "level-used.\(UUID().uuidString)")
+        let settings = CleanupSettings(defaults: UserDefaults(suiteName: UUID().uuidString)!, keychain: keychain)
+        let pipeline = CleanupPipeline(settings: settings)
+        XCTAssertEqual(pipeline.level(for: nil), .light, "the default")
+        XCTAssertEqual(pipeline.level(for: .high), .high, "the pill's choice")
+        settings.enabled = false
+        XCTAssertNil(pipeline.level(for: .high), "cleanup off")
+    }
+
     func testLevelNamesMapBothWays() {
         for name in DictationLevel.allCases {
             XCTAssertEqual(DictationLevel(Level(name)), name)

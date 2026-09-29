@@ -6,12 +6,15 @@ struct ContentView: View {
     let settings: CleanupSettings
     let cleanup: CleanupPipeline
     let dictionary: DictionaryModel
+    let history: DictationHistory
+    let style: StyleModel
     let setup: SetupModel
     @State private var testText = ""
     @State private var showingSettings = false
     @State private var showingSetup = false
     /// Setup opens by itself once per launch until the keyboard works.
     @State private var offeredSetup = false
+    @State private var importNotice: String?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -46,8 +49,26 @@ struct ContentView: View {
                             Label("Dictionary", systemImage: "character.book.closed")
                         }
                     }
+                    NavigationLink {
+                        StyleView(model: style)
+                    } label: {
+                        LabeledContent {
+                            Text(style.overview.ready ? style.overview.toneLabel : "\(style.overview.samples) of \(style.overview.minSamplesToApply)")
+                        } label: {
+                            Label("Your style", systemImage: "person.text.rectangle")
+                        }
+                    }
+                    NavigationLink {
+                        HistoryView(history: history)
+                    } label: {
+                        LabeledContent {
+                            Text("\(history.records.count)")
+                        } label: {
+                            Label("History", systemImage: "clock.arrow.circlepath")
+                        }
+                    }
                 } footer: {
-                    Text("Names and terms you add here are spelled right when you dictate.")
+                    Text("Names and terms in your dictionary are spelled right when you dictate. History keeps every dictation on this iPhone.")
                 }
                 Section {
                     Button {
@@ -81,6 +102,7 @@ struct ContentView: View {
             }
             .onAppear {
                 setup.refresh()
+                learnFromImportFolder()
                 // Not when the keyboard just opened the app to start Flow:
                 // the Flow banner is what matters then.
                 if !offeredSetup, !setup.snapshot.isReady, !flow.isOn {
@@ -89,8 +111,26 @@ struct ContentView: View {
                 }
             }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { setup.refresh() }
+                if phase == .active {
+                    setup.refresh()
+                    learnFromImportFolder()
+                }
             }
+            .alert(importNotice ?? "", isPresented: Binding(get: { importNotice != nil }, set: { if !$0 { importNotice = nil } })) {
+                Button("OK") { importNotice = nil }
+            }
+        }
+    }
+}
+
+extension ContentView {
+    /// Writing copied into Documents/Import over the cable (the email corpus).
+    fileprivate func learnFromImportFolder() {
+        do {
+            let learned = try StyleImport.learnFromImportFolder(into: style)
+            if learned > 0 { importNotice = "Learned your style from \(learned) pieces of writing." }
+        } catch {
+            importNotice = error.localizedDescription
         }
     }
 }
@@ -195,5 +235,5 @@ private struct DictationPanel: View {
     let settings = CleanupSettings()
     let cleanup = CleanupPipeline(settings: settings)
     let dictation = DictationService(cleanup: cleanup)
-    ContentView(dictation: dictation, flow: FlowController(dictation: dictation, settings: settings), settings: settings, cleanup: cleanup, dictionary: DictionaryModel(), setup: SetupModel(settings: settings))
+    ContentView(dictation: dictation, flow: FlowController(dictation: dictation, settings: settings), settings: settings, cleanup: cleanup, dictionary: DictionaryModel(), history: DictationHistory(), style: StyleModel(), setup: SetupModel(settings: settings))
 }
