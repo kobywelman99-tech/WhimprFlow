@@ -17,6 +17,16 @@ final class MicBar: UIView {
     var onMic: () -> Void = {}
     var onLevel: () -> Void = {}
     var onUndo: () -> Void = {}
+    var onInsertPending: () -> Void = {}
+
+    /// What the middle of the bar offers instead of the status.
+    enum Chip: Equatable {
+        case none
+        case undo
+        /// A finished dictation to insert; the text is shown shortened.
+        case insert(String)
+    }
+    private(set) var chip: Chip = .none
 
     var level: DictationLevel = .light {
         didSet { updateLevel() }
@@ -26,6 +36,7 @@ final class MicBar: UIView {
     let levelPill = UIButton(type: .system)
     let statusLabel = UILabel()
     let undoButton = UIButton(type: .system)
+    let insertButton = UIButton(type: .system)
     let micButton = UIButton(type: .system)
 
     override init(frame: CGRect) {
@@ -78,10 +89,24 @@ final class MicBar: UIView {
         statusLabel.text = text
     }
 
-    /// Shows the Undo chip in place of the status.
-    func setUndoVisible(_ visible: Bool) {
-        undoButton.isHidden = !visible
-        statusLabel.isHidden = visible
+    func setChip(_ chip: Chip) {
+        self.chip = chip
+        undoButton.isHidden = chip != .undo
+        if case .insert(let text) = chip {
+            insertButton.configuration?.title = "Insert “\(Self.preview(of: text))”"
+            insertButton.accessibilityValue = text
+            insertButton.isHidden = false
+        } else {
+            insertButton.isHidden = true
+        }
+        statusLabel.isHidden = chip != .none
+    }
+
+    /// The first few words, so the chip fits the bar.
+    static func preview(of text: String, words: Int = 3) -> String {
+        let all = text.split(whereSeparator: \.isWhitespace)
+        let start = all.prefix(words).joined(separator: " ")
+        return all.count > words ? start + "…" : start
     }
 
     private func build() {
@@ -115,10 +140,21 @@ final class MicBar: UIView {
         undoButton.isHidden = true
         undoButton.addAction(UIAction { [weak self] _ in self?.onUndo() }, for: .touchUpInside)
 
+        var insert = UIButton.Configuration.filled()
+        insert.cornerStyle = .capsule
+        insert.image = UIImage(systemName: "text.insert")
+        insert.imagePadding = 4
+        insert.titleLineBreakMode = .byTruncatingTail
+        insert.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        insertButton.configuration = insert
+        insertButton.accessibilityLabel = "Insert your last dictation"
+        insertButton.isHidden = true
+        insertButton.addAction(UIAction { [weak self] _ in self?.onInsertPending() }, for: .touchUpInside)
+
         micButton.addAction(UIAction { [weak self] _ in self?.onMic() }, for: .touchUpInside)
 
         let middle = UIView()
-        for view in [statusLabel, undoButton] {
+        for view in [statusLabel, undoButton, insertButton] {
             view.translatesAutoresizingMaskIntoConstraints = false
             middle.addSubview(view)
         }
@@ -147,6 +183,11 @@ final class MicBar: UIView {
             undoButton.centerXAnchor.constraint(equalTo: middle.centerXAnchor),
             undoButton.centerYAnchor.constraint(equalTo: middle.centerYAnchor),
             undoButton.heightAnchor.constraint(equalToConstant: 32),
+            insertButton.centerYAnchor.constraint(equalTo: middle.centerYAnchor),
+            insertButton.leadingAnchor.constraint(greaterThanOrEqualTo: middle.leadingAnchor),
+            insertButton.trailingAnchor.constraint(lessThanOrEqualTo: middle.trailingAnchor),
+            insertButton.centerXAnchor.constraint(equalTo: middle.centerXAnchor),
+            insertButton.heightAnchor.constraint(equalToConstant: 32),
         ])
 
         updateLevel()

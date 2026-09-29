@@ -56,12 +56,18 @@ struct BridgeMessage: Codable, Equatable, Sendable {
     enum Kind: String, Codable, Sendable {
         // keyboard → app
         case hello, start, stop, cancel
+        /// The keyboard inserted the pending dictation.
+        case claim
         // app → keyboard
         case ready, denied, recording, audioLevel, partial, transcribing, cleaning, final, error
+        /// A dictation finished after its keyboard closed (e.g. scrolling a
+        /// chat hides the keyboard). Offered to insert, never inserted blindly:
+        /// the user may be in a different text box by now.
+        case pending
     }
 
     var kind: Kind
-    /// The token for `hello`, the text for `partial`/`final`, the message for `error`.
+    /// The token for `hello`, the text for `partial`/`final`/`pending`, the message for `error`.
     var text: String?
     /// `ready`: the app's default level. `start`: the level for this dictation.
     var cleanupLevel: DictationLevel?

@@ -124,6 +124,50 @@ final class KeyboardUXTests: XCTestCase {
         XCTAssertTrue(keyboard.micBar.undoButton.isHidden)
     }
 
+    // MARK: Koby's scrolling bug
+
+    func testClosingTheKeyboardMidSentenceDoesNotCancel() {
+        let keyboard = makeKeyboard()
+        keyboard.handleBridge(.ready(nil))
+        keyboard.handleBridge(.recording)
+        keyboard.viewWillDisappear(false)
+        XCTAssertFalse(sent.contains(BridgeMessage(.cancel)), "scrolling a chat hides the keyboard; the words must survive")
+    }
+
+    func testAFinishedDictationIsOfferedNotInserted() throws {
+        let keyboard = makeKeyboard()
+        keyboard.handleBridge(.ready(nil))
+        keyboard.handleBridge(.pending("Sounds good, I'll call you after lunch."))
+
+        XCTAssertEqual(keyboard.micBar.chip, .insert("Sounds good, I'll call you after lunch."))
+        XCTAssertFalse(keyboard.micBar.insertButton.isHidden)
+        XCTAssertEqual(keyboard.micBar.insertButton.configuration?.title, "Insert “Sounds good, I'll…”")
+
+        tap(keyboard.micBar.insertButton)
+        XCTAssertEqual(sent, [BridgeMessage(.claim)], "the app is told it was used")
+        XCTAssertNil(keyboard.pendingText)
+        XCTAssertEqual(keyboard.micBar.chip, .undo, "and it can be undone like any dictation")
+    }
+
+    func testTypingKeepsTheOfferButDictatingReplacesIt() throws {
+        let keyboard = makeKeyboard()
+        keyboard.handleBridge(.ready(nil))
+        keyboard.handleBridge(.pending("Earlier words"))
+
+        let key = try XCTUnwrap(allButtons(in: keyboard.view).first { $0.title(for: .normal) == "a" })
+        tap(key)
+        XCTAssertEqual(keyboard.micBar.chip, .insert("Earlier words"), "still there after typing")
+
+        tap(keyboard.micBar.micButton)
+        XCTAssertEqual(keyboard.micBar.chip, .none, "a new dictation replaces it (it's in History)")
+        XCTAssertEqual(sent.last?.kind, .start)
+    }
+
+    func testPreviewIsShort() {
+        XCTAssertEqual(MicBar.preview(of: "one two three four five"), "one two three…")
+        XCTAssertEqual(MicBar.preview(of: "just two"), "just two")
+    }
+
     func testBarFitsTheSmallestPhone() {
         let keyboard = makeKeyboard()
         keyboard.view.frame.size.width = 320

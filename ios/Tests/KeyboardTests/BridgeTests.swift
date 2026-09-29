@@ -133,6 +133,39 @@ final class BridgeTests: XCTestCase {
         XCTAssertEqual(authorized, 1)
     }
 
+    func testPendingDictationArrivesAfterReady() async throws {
+        let server = try startServer(token: "secret")
+        server.onAuthorized = { server.send(BridgeMessage(.pending, text: "Kept for you")) }
+        var claimed = false
+        server.onMessage = { if $0.kind == .claim { claimed = true } }
+
+        let client = BridgeClient()
+        self.client = client
+        var events: [BridgeClient.Event] = []
+        let both = expectation(description: "ready and pending")
+        client.onEvent = { event in
+            events.append(event)
+            if events.count == 2 { both.fulfill() }
+        }
+        client.connect(token: "secret")
+        await fulfillment(of: [both], timeout: 3)
+        XCTAssertEqual(events, [.ready(nil), .pending("Kept for you")], "ready first, so the keyboard is set up to show it")
+
+        client.send(BridgeMessage(.claim))
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(claimed)
+    }
+
+    func testEachKeyboardConnectionIsNumbered() async throws {
+        let server = try startServer(token: "secret")
+        XCTAssertFalse(server.isConnected)
+        _ = try await connectClient(token: "secret")
+        let first = server.connectionID
+        XCTAssertTrue(server.isConnected)
+        _ = try await connectClient(token: "secret")
+        XCTAssertEqual(server.connectionID, first + 1, "a reopened keyboard is a different connection")
+    }
+
     func testServerNoticesKeyboardLeaving() async throws {
         let server = try startServer(token: "secret")
         let left = expectation(description: "disconnect")

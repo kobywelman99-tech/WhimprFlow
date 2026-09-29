@@ -52,6 +52,8 @@ final class KeyboardViewController: UIInputViewController {
     /// Whether the user allowed Full Access (needed for the bridge); tests override.
     lazy var fullAccess: () -> Bool = { [unowned self] in self.hasFullAccess }
     private var undo = UndoTracker()
+    /// A dictation that finished after this keyboard closed, offered by the app.
+    private(set) var pendingText: String?
     private var undoTimer: Timer?
     /// The mic was tapped before we knew whether Flow is on: start dictating
     /// if it is, open the app if it isn't.
@@ -98,12 +100,16 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        if flowState == .recording { send(BridgeMessage(.cancel)) }
+        // No cancel here: this also happens when scrolling a chat hides the
+        // keyboard mid-sentence. The app finishes the dictation and offers it
+        // the next time the keyboard opens. (✕ still cancels.)
         bridge.disconnect()
         flowState = .off
         micPending = false
         overlay.hide()
         hideUndo()
+        pendingText = nil
+        updateChip()
         updateMicButton()
     }
 
@@ -124,6 +130,7 @@ final class KeyboardViewController: UIInputViewController {
         micBar.onMic = { [weak self] in self?.micTapped() }
         micBar.onLevel = { [weak self] in self?.cycleLevel() }
         micBar.onUndo = { [weak self] in self?.undoDictation() }
+        micBar.onInsertPending = { [weak self] in self?.insertPending() }
 
         rowsStack.axis = .vertical
         rowsStack.spacing = 10
@@ -356,6 +363,9 @@ final class KeyboardViewController: UIInputViewController {
         switch flowState {
         case .ready:
             impact.impactOccurred()
+            // A new dictation replaces the one waiting (it's in History).
+            pendingText = nil
+            updateChip()
             send(BridgeMessage(.start, cleanupLevel: pillLevel))
             micBar.setStatus("Starting…")
         case .recording:
@@ -443,6 +453,9 @@ final class KeyboardViewController: UIInputViewController {
             overlay.hide()
             micBar.setStatus(message)
             notice.notificationOccurred(.error)
+        case .pending(let text):
+            pendingText = text
+            updateChip()
         }
         updateMicButton()
     }
@@ -470,7 +483,7 @@ final class KeyboardViewController: UIInputViewController {
 
     private func showUndo(for inserted: String) {
         undo.recordInsert(inserted)
-        micBar.setUndoVisible(true)
+        micBar.setChip(.undo)
         undoTimer?.invalidate()
         undoTimer = Timer.scheduledTimer(withTimeInterval: UndoTracker.window, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.hideUndo() }
@@ -481,8 +494,29 @@ final class KeyboardViewController: UIInputViewController {
         undoTimer?.invalidate()
         undoTimer = nil
         undo.clear()
-        micBar.setUndoVisible(false)
+        updateChip()
         if flowState == .ready { micBar.setStatus("Flow is on") }
+    }
+
+    /// Undo while it applies, otherwise a pending dictation to insert.
+    private func updateChip() {
+        if undoTimer != nil {
+            micBar.setChip(.undo)
+        } else if let pendingText {
+            micBar.setChip(.insert(pendingText))
+        } else {
+            micBar.setChip(.none)
+        }
+    }
+
+    private func insertPending() {
+        guard let text = pendingText else { return }
+        pendingText = nil
+        let inserted = Self.joining(text, after: textDocumentProxy.documentContextBeforeInput)
+        textDocumentProxy.insertText(inserted)
+        send(BridgeMessage(.claim))
+        notice.notificationOccurred(.success)
+        showUndo(for: inserted)
     }
 
     private func undoDictation() {

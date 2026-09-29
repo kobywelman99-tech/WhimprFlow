@@ -11,8 +11,12 @@ final class BridgeServer {
     var onMessage: ((BridgeMessage) -> Void)?
     /// The authorised keyboard went away (keyboard hidden, app switched).
     var onDisconnect: (() -> Void)?
-    /// A keyboard presented the right token.
+    /// A keyboard presented the right token (called after it's sent `ready`).
     var onAuthorized: (() -> Void)?
+    /// Counts authorised connections, so a result can be matched to the
+    /// keyboard that asked for it rather than whichever one is open now.
+    private(set) var connectionID = 0
+    var isConnected: Bool { client != nil && clientAuthorized }
     /// What an authorised keyboard is told first (the app adds its default level).
     var makeReady: () -> BridgeMessage = { BridgeMessage(.ready) }
 
@@ -101,9 +105,10 @@ final class BridgeServer {
         guard clientAuthorized else {
             if message.kind == .hello, message.text == token {
                 clientAuthorized = true
+                connectionID += 1
                 log.info("Keyboard connected")
-                onAuthorized?()
                 send(makeReady())
+                onAuthorized?()
             } else {
                 log.error("Rejected a bridge client with the wrong token")
                 send(BridgeMessage(.denied))

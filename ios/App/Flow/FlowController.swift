@@ -50,11 +50,7 @@ final class FlowController {
                     BridgeMessage(.ready, cleanupLevel: self.map { DictationLevel($0.settings.level) })
                 }
                 server.onMessage = { [weak self] message in self?.handle(message) }
-                server.onAuthorized = { [weak self] in
-                    self?.keyboardConnected = true
-                    // Proves the keyboard is added and has Full Access (Setup).
-                    SetupProgress().markKeyboardConnected()
-                }
+                server.onAuthorized = { [weak self] in self?.keyboardAuthorized() }
                 server.onDisconnect = { [weak self] in self?.keyboardDisconnected() }
                 try server.start()
                 self.server = server
@@ -80,55 +76,121 @@ final class FlowController {
         isOn = false
     }
 
+    /// Where a finished dictation goes.
+    enum Delivery: Equatable {
+        /// Its keyboard is still open: insert it.
+        case insert
+        /// Its keyboard closed: keep it for the next keyboard to offer.
+        case keepForLater
+    }
+
+    static func delivery(requestedBy: Int?, connected: Int?) -> Delivery {
+        requestedBy != nil && requestedBy == connected ? .insert : .keepForLater
+    }
+
+    /// The connection that started the dictation in progress.
+    @ObservationIgnored private var activeConnection: Int?
+    @ObservationIgnored private var pending = PendingDictation()
+
+    private var currentConnection: Int? {
+        guard let server, server.isConnected else { return nil }
+        return server.connectionID
+    }
+
+    /// Progress goes only to the keyboard that started the dictation.
+    private func sendToActive(_ message: BridgeMessage) {
+        guard activeConnection != nil, activeConnection == currentConnection else { return }
+        server?.send(message)
+    }
+
     private func handle(_ message: BridgeMessage) {
         keyboardConnected = true
         resetIdleTimer()
         switch message.kind {
         case .start:
+            pending.clear()
+            activeConnection = currentConnection
             Task {
                 do {
                     try await dictation.beginUtterance(
                         level: message.cleanupLevel.map(Level.init),
                         onText: { [weak self] text in
-                            self?.server?.send(BridgeMessage(.partial, text: text))
+                            self?.sendToActive(BridgeMessage(.partial, text: text))
                         },
                         onLevel: { [weak self] value in
                             Task { @MainActor in
-                                self?.server?.send(BridgeMessage(.audioLevel, value: value))
+                                self?.sendToActive(BridgeMessage(.audioLevel, value: value))
                             }
                         }
                     )
-                    server?.send(BridgeMessage(.recording))
+                    if activeConnection != nil, activeConnection == currentConnection {
+                        sendToActive(BridgeMessage(.recording))
+                    } else {
+                        // The keyboard closed while the mic was starting.
+                        finish()
+                    }
                 } catch {
-                    server?.send(BridgeMessage(.error, text: error.localizedDescription))
+                    sendToActive(BridgeMessage(.error, text: error.localizedDescription))
                 }
             }
         case .stop:
-            server?.send(BridgeMessage(.transcribing))
-            Task {
-                do {
-                    let text = try await dictation.finishUtterance(source: .keyboard) { [weak self] in
-                        self?.server?.send(BridgeMessage(.cleaning))
-                    }
-                    server?.send(BridgeMessage(.final, text: text))
-                    SetupProgress().markKeyboardDictated()
-                } catch {
-                    server?.send(BridgeMessage(.error, text: error.localizedDescription))
-                }
-                resetIdleTimer()
-            }
+            sendToActive(BridgeMessage(.transcribing))
+            finish()
         case .cancel:
+            activeConnection = nil
             Task { await dictation.cancelUtterance() }
-        case .hello, .ready, .denied, .recording, .audioLevel, .partial, .transcribing, .cleaning, .final, .error:
+        case .claim:
+            pending.clear()
+        case .hello, .ready, .denied, .recording, .audioLevel, .partial, .transcribing, .cleaning, .final, .error, .pending:
             break
+        }
+    }
+
+    /// Finishes the dictation in progress and delivers it to its keyboard,
+    /// or keeps it if that keyboard has closed in the meantime.
+    private func finish() {
+        let requester = activeConnection
+        Task {
+            do {
+                let text = try await dictation.finishUtterance(source: .keyboard) { [weak self] in
+                    self?.sendToActive(BridgeMessage(.cleaning))
+                }
+                activeConnection = nil
+                switch Self.delivery(requestedBy: requester, connected: currentConnection) {
+                case .insert:
+                    server?.send(BridgeMessage(.final, text: text))
+                case .keepForLater:
+                    guard !text.isEmpty else { break }
+                    pending.store(text)
+                    log.info("Dictation finished after its keyboard closed; kept for later")
+                    if server?.isConnected == true { server?.send(BridgeMessage(.pending, text: text)) }
+                }
+                SetupProgress().markKeyboardDictated()
+            } catch {
+                activeConnection = nil
+                sendToActive(BridgeMessage(.error, text: error.localizedDescription))
+            }
+            resetIdleTimer()
+        }
+    }
+
+    /// A keyboard connected: offer it anything that finished while no
+    /// keyboard was open.
+    private func keyboardAuthorized() {
+        keyboardConnected = true
+        // Proves the keyboard is added and has Full Access (Setup).
+        SetupProgress().markKeyboardConnected()
+        if let text = pending.text() {
+            server?.send(BridgeMessage(.pending, text: text))
         }
     }
 
     private func keyboardDisconnected() {
         keyboardConnected = false
-        // The keyboard went away mid-sentence: don't keep listening.
+        // The keyboard closed mid-sentence (scrolling a chat hides it): finish
+        // rather than throw the words away. The result is kept for later.
         if dictation.isRecording {
-            Task { await dictation.cancelUtterance() }
+            finish()
         }
     }
 

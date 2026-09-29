@@ -17,6 +17,8 @@ final class BridgeClient {
         /// The words are in; Claude is tidying them up.
         case cleaning
         case final(String)
+        /// A dictation that finished after this keyboard closed, to offer.
+        case pending(String)
         case error(String)
     }
 
@@ -107,7 +109,9 @@ final class BridgeClient {
             onEvent?(.final(message.text ?? ""))
         case .error:
             onEvent?(.error(message.text ?? "Something went wrong."))
-        case .hello, .start, .stop, .cancel:
+        case .pending:
+            if let text = message.text, !text.isEmpty { onEvent?(.pending(text)) }
+        case .hello, .start, .stop, .cancel, .claim:
             break
         }
     }

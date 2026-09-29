@@ -197,7 +197,8 @@ Chosen with Koby (2026-09-29), from user feedback on Wispr-style keyboards and t
 #### Bugs from Koby's first day of real use (2026-09-29)
 - [x] **Music and headphones while Flow is on.** Fixed: `Recorder.sessionOptions` adds `.allowBluetoothA2DP`, and a route change now restarts the mic instead of ending Flow (the second bug, found while fixing the first); a mid-dictation format change swaps the converter without losing audio. Tests: `AudioSessionTests`, `RouteChangeTests` (mutation-checked). 85 tests pass on the iPhone. [ ] Koby checks with his headphones.
   Original report: Music moves to the phone speaker and Bluetooth headphones don't connect. Likely cause: the session is `.playAndRecord` with `[.mixWithOthers, .defaultToSpeaker]` and no `.allowBluetoothA2DP`, so A2DP output isn't allowed. Fix: add `.allowBluetoothA2DP`, check that the mic stays built-in and output goes to headphones. Needs Koby's headphones to verify
-- [ ] **Scrolling loses the dictation.** Probable cause: scrolling a chat dismisses the keyboard, and `viewWillDisappear` sends `cancel`. Fix: send `stop` instead, then insert when the keyboard comes back, or keep the text for "insert last". Confirm with Koby what he saw
+- [x] **Scrolling loses the dictation.** Fixed (2026-09-29): the keyboard no longer cancels when it closes; the app finishes the dictation, and results only go to the keyboard connection that started them (numbered connections). One that finishes after its keyboard closed is kept for 10 minutes and offered as an "Insert '…'" chip the next time the keyboard opens (tap to insert, then Undo). Tests: `KeyboardUXTests` (mutation-checked against the old cancel), `BridgeTests`, `PendingDictationTests`.
+  Original report: Probable cause: scrolling a chat dismisses the keyboard, and `viewWillDisappear` sends `cancel`. Fix: send `stop` instead, then insert when the keyboard comes back, or keep the text for "insert last". Confirm with Koby what he saw
 
 #### Later list (from the same feedback)
 - Hold-to-talk in addition to tap · Dynamic Island Live Activity for Flow · Flow timeout setting · Tone styles (Formal / Casual / Very casual / Excited; needs shared Rust prompt work) · **Per-context styles** (text message vs email vs report/essay: the keyboard can't see the host app, so infer from the field (Send return key, email field) plus a context pill)
@@ -235,7 +236,8 @@ Decided with Koby (2026-09-29): keep every dictation; learn from all of them (ke
 **Files:** `App/Style/StyleImport.swift`, `App/Style/StyleView.swift`
 
 **Done (2026-09-29):** 166 of Koby's last 200 sent emails learned on the phone (Gmail search previews, own words only; 12 empty, 76 previews cut at the last full sentence). The first pass leaked his signature ("koby welman", phone-number fragments) into the phrase counts, so the profile was wiped and re-learned after cleaning; the importer now cuts inline signatures and phone numbers (tests added). Every copy of the email text was deleted from the Mac, and the app deleted its copy after learning. 102 tests pass on the iPhone, 18 Rust.
-**Follow-up (desktop core, `style.rs`):** repeated-phrase counting reports overlapping fragments ("let me", "me know", "let me know"); keep only the longest phrase that covers the others. Not changed here because it's Koby's uncommitted desktop work.
+**Done (desktop core, `style.rs`, left uncommitted with Koby's other desktop work):** `top_phrases` drops fragments that rarely appear outside a longer phrase (two new tests; whimpr-core 54 pass).
+**Was:** repeated-phrase counting reports overlapping fragments ("let me", "me know", "let me know"); keep only the longest phrase that covers the others. Not changed here because it's Koby's uncommitted desktop work.
 
 ## Checkpoint: v1 complete
 - [ ] All acceptance criteria met; `cargo check --workspace` green; review with Koby
