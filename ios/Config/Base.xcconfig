@@ -1,0 +1,10 @@
+// Shared build settings for both targets.
+//
+// Signing is per-developer, so the team lives in Local.xcconfig (gitignored).
+// Copy Local.xcconfig.example to Local.xcconfig and fill in your team ID.
+// A free Personal Team also needs a bundle ID nobody else has registered,
+// which is why the bundle ID is overridable there too.
+
+WHIMPR_BUNDLE_ID = com.whimpr.whimprflow.ios
+
+#include? "Local.xcconfig"

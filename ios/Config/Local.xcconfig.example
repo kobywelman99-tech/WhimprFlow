@@ -1,0 +1,8 @@
+// Copy to Local.xcconfig (gitignored) and fill in.
+// Team ID: Xcode > Settings > Accounts > your Apple ID > Personal Team,
+// or the OU field of your "Apple Development" certificate.
+
+DEVELOPMENT_TEAM = ABCDE12345
+
+// Uncomment if Xcode says the bundle ID is already taken.
+// WHIMPR_BUNDLE_ID = com.yourname.whimprflow
