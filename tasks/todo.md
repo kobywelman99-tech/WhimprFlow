@@ -200,7 +200,7 @@ Chosen with Koby (2026-09-29), from user feedback on Wispr-style keyboards and t
 - [ ] **Scrolling loses the dictation.** Probable cause: scrolling a chat dismisses the keyboard, and `viewWillDisappear` sends `cancel`. Fix: send `stop` instead, then insert when the keyboard comes back, or keep the text for "insert last". Confirm with Koby what he saw
 
 #### Later list (from the same feedback)
-- Hold-to-talk in addition to tap · Recent history (cleaned + raw, copy) · Dynamic Island Live Activity for Flow · Flow timeout setting · Tone styles (Formal / Casual / Very casual / Excited; needs shared Rust prompt work)
+- Hold-to-talk in addition to tap · Dynamic Island Live Activity for Flow · Flow timeout setting · Tone styles (Formal / Casual / Very casual / Excited; needs shared Rust prompt work) · **Per-context styles** (text message vs email vs report/essay: the keyboard can't see the host app, so infer from the field (Send return key, email field) plus a context pill)
 
 ### Task 9: Onboarding
 - [x] Setup checklist (`App/Setup/`), opened by itself once per launch until the keyboard works (not when the keyboard just opened the app to start Flow): microphone → add keyboard → Full Access → Anthropic key (optional) → first dictation
@@ -211,10 +211,31 @@ Chosen with Koby (2026-09-29), from user feedback on Wispr-style keyboards and t
 
 **Dependencies:** T4 · **Scope:** S
 
-### Task 10: Style + stats (optional)
-- [ ] Feed Rust `StyleStore.observe` and `StatsStore` after each dictation; include the style summary in the cleanup prompt
+### Task 10: Learn Koby's style from everything he says and writes
+Decided with Koby (2026-09-29): keep every dictation; learn from all of them (keyboard and in-app); seed from his last 200 sent emails (pulled with the Gmail connector in a Claude session, his own words only) and from in-app imports; phone and desktop profiles stay separate; tones and per-context styles (message / email / report) go on the later list.
 
-**Dependencies:** T5, T6 · **Scope:** S
+#### 10a: Dictation history (M)
+- [x] Every dictation saved on the phone: what was said (raw), what was inserted, date, keyboard or app, level. Kept until deleted
+- [x] History screen: newest first, copy either version, swipe to delete, clear all
+- [x] Tests: saving, reloading, deleting, and a corrupt file doesn't lose the app
+**Files:** `App/History/DictationHistory.swift`, `App/History/HistoryView.swift`, `App/Dictation/DictationService.swift`
+
+#### 10b: Style learning (M)
+- [x] `whimpr-ffi` wraps whimpr-core's `StyleStore` (the desktop's passive profile: sentence length, contractions, go-to phrases, tone; applies after 5 samples)
+- [x] Each dictation's raw words are observed; the profile's summary goes into the cleanup prompt (`style_summary`), as on desktop
+- [x] Style screen: what it has learned, an on/off switch, Reset
+- [x] Tests: Rust (observe → summary, persistence), Swift (the summary reaches the prompt, off means no summary)
+**Files:** `crates/whimpr-ffi/src/lib.rs`, `App/Style/*`, `App/Cleanup/CleanupPipeline.swift`
+
+#### 10c: Import past writing (M)
+- [x] In-app Import: paste text or pick text files; split into samples; observed by the profile; the text itself isn't kept
+- [x] Import folder: `Documents/Import/*.txt` is learned on launch, then deleted (how the email corpus gets onto the phone over the cable)
+- [x] Email corpus: last 200 sent Gmail messages, his own words only (no quoted replies, greetings, sign-offs or signatures, so "Best regards" can't become a "go-to phrase")
+- [x] Tests: splitting and stripping, the import folder is learned and emptied
+**Files:** `App/Style/StyleImport.swift`, `App/Style/StyleView.swift`
+
+**Done (2026-09-29):** 166 of Koby's last 200 sent emails learned on the phone (Gmail search previews, own words only; 12 empty, 76 previews cut at the last full sentence). The first pass leaked his signature ("koby welman", phone-number fragments) into the phrase counts, so the profile was wiped and re-learned after cleaning; the importer now cuts inline signatures and phone numbers (tests added). Every copy of the email text was deleted from the Mac, and the app deleted its copy after learning. 102 tests pass on the iPhone, 18 Rust.
+**Follow-up (desktop core, `style.rs`):** repeated-phrase counting reports overlapping fragments ("let me", "me know", "let me know"); keep only the longest phrase that covers the others. Not changed here because it's Koby's uncommitted desktop work.
 
 ## Checkpoint: v1 complete
 - [ ] All acceptance criteria met; `cargo check --workspace` green; review with Koby
