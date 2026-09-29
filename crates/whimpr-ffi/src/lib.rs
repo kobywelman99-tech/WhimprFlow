@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use whimpr_core::cleanup::{self, CleanupContext, CleanupLevel, VocabEntry};
 use whimpr_core::dictionary::{DictSource, DictionaryStore};
+use whimpr_core::style::StyleStore;
 
 uniffi::setup_scaffolding!();
 
@@ -251,17 +252,185 @@ impl UserDictionary {
     }
 }
 
+// MARK: Style
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PhraseCount {
+    pub phrase: String,
+    pub count: u32,
+}
+
+/// What the Style screen shows (whimpr-core's `StyleSummary`).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct StyleOverview {
+    pub samples: u32,
+    pub min_samples_to_apply: u32,
+    /// Enough samples that the profile shapes cleanup.
+    pub ready: bool,
+    pub avg_sentence_words: f32,
+    /// 0–1: how often a contractable phrase comes out contracted.
+    pub contraction_rate: f32,
+    pub top_fillers: Vec<PhraseCount>,
+    pub top_phrases: Vec<PhraseCount>,
+    pub tone_label: String,
+    /// Exactly what goes into the cleanup prompt, if anything yet.
+    pub prompt_summary: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum StyleError {
+    #[error("Couldn't save your style: {message}")]
+    Io { message: String },
+}
+
+/// The user's passive style profile: whimpr-core's `StyleStore`, the same
+/// counting the desktop does, saved to `path` after every change.
+#[derive(uniffi::Object)]
+pub struct StyleProfile {
+    path: PathBuf,
+    store: Mutex<StyleStore>,
+}
+
+#[uniffi::export]
+impl StyleProfile {
+    #[uniffi::constructor]
+    pub fn open(path: String) -> Arc<Self> {
+        let path = PathBuf::from(path);
+        let store = StyleStore::load(&path);
+        Arc::new(Self { path, store: Mutex::new(store) })
+    }
+
+    /// Learns from one dictation or piece of writing.
+    pub fn observe(&self, text: String) -> Result<(), StyleError> {
+        self.observe_all(vec![text]).map(|_| ())
+    }
+
+    /// Learns from many samples (an import) with one save. Returns how many
+    /// had any words.
+    pub fn observe_all(&self, samples: Vec<String>) -> Result<u32, StyleError> {
+        let mut store = self.lock();
+        let before = store.samples;
+        for sample in &samples {
+            store.observe(sample);
+        }
+        let learned = store.samples - before;
+        if learned > 0 {
+            self.save(&store)?;
+        }
+        Ok(learned)
+    }
+
+    pub fn overview(&self) -> StyleOverview {
+        let store = self.lock();
+        let summary = store.summary();
+        let counts = |items: Vec<(String, u32)>| {
+            items.into_iter().map(|(phrase, count)| PhraseCount { phrase, count }).collect()
+        };
+        StyleOverview {
+            samples: summary.samples,
+            min_samples_to_apply: summary.min_samples_to_apply,
+            ready: summary.ready,
+            avg_sentence_words: summary.avg_sentence_words,
+            contraction_rate: summary.contraction_rate,
+            top_fillers: counts(summary.top_fillers),
+            top_phrases: counts(summary.top_phrases),
+            tone_label: summary.tone_label,
+            prompt_summary: store.summary_for_prompt(),
+        }
+    }
+
+    /// The one-line description for the cleanup prompt, once there's enough.
+    pub fn prompt_summary(&self) -> Option<String> {
+        self.lock().summary_for_prompt()
+    }
+
+    pub fn reset(&self) -> Result<(), StyleError> {
+        let mut store = self.lock();
+        store.reset();
+        self.save(&store)
+    }
+}
+
+impl StyleProfile {
+    fn lock(&self) -> MutexGuard<'_, StyleStore> {
+        self.store.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn save(&self, store: &StyleStore) -> Result<(), StyleError> {
+        store.save(&self.path).map_err(|e| StyleError::Io { message: e.to_string() })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A fresh file path per call. Tests run in parallel, and a clock reading
+    /// alone can repeat, so a counter keeps every path unique.
     fn temp_path() -> String {
-        let dir = std::env::temp_dir().join(format!("whimpr-ffi-{}-{}", std::process::id(), rand_suffix()));
-        dir.join("dictionary.json").to_string_lossy().into_owned()
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "whimpr-ffi-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        dir.join("store.json").to_string_lossy().into_owned()
     }
 
-    fn rand_suffix() -> u128 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    const CASUAL: &[&str] = &[
+        "so I don't really think we should ship it on Friday, you know",
+        "I'm gonna check with Sam, I don't think it's ready yet",
+        "honestly it's fine, we don't need another meeting about it",
+        "I'll send it over tonight, it's basically done",
+        "yeah I don't mind, it's up to you honestly",
+        "I think it's good, I'll look at it again tomorrow",
+    ];
+
+    #[test]
+    fn style_needs_five_samples_before_it_shapes_cleanup() {
+        let style = StyleProfile::open(temp_path());
+        assert_eq!(style.observe_all(CASUAL[..4].iter().map(|s| s.to_string()).collect()).unwrap(), 4);
+        assert!(!style.overview().ready);
+        assert!(style.prompt_summary().is_none());
+
+        style.observe(CASUAL[4].into()).unwrap();
+        let overview = style.overview();
+        assert!(overview.ready);
+        assert!(overview.contraction_rate > 0.9, "all contracted: {}", overview.contraction_rate);
+        let summary = style.prompt_summary().expect("a summary once ready");
+        assert!(summary.contains("contractions"), "{summary}");
+        assert_eq!(overview.prompt_summary.as_deref(), Some(summary.as_str()));
+    }
+
+    #[test]
+    fn style_persists_and_resets() {
+        let path = temp_path();
+        StyleProfile::open(path.clone())
+            .observe_all(CASUAL.iter().map(|s| s.to_string()).collect())
+            .unwrap();
+        let reopened = StyleProfile::open(path.clone());
+        assert_eq!(reopened.overview().samples, CASUAL.len() as u32);
+
+        reopened.reset().unwrap();
+        assert_eq!(StyleProfile::open(path).overview().samples, 0);
+    }
+
+    #[test]
+    fn style_skips_empty_samples() {
+        let style = StyleProfile::open(temp_path());
+        assert_eq!(style.observe_all(vec!["".into(), "   ".into(), "hello there".into()]).unwrap(), 1);
+    }
+
+    #[test]
+    fn style_summary_reaches_the_prompt() {
+        let style = StyleProfile::open(temp_path());
+        style.observe_all(CASUAL.iter().map(|s| s.to_string()).collect()).unwrap();
+        let summary = style.prompt_summary().unwrap();
+        let request = prepare_cleanup("um so send it tonight".into(), Level::Light, vec![], None, Some(summary.clone()));
+        let everything = format!("{}\n{}", request.system, request.messages.last().unwrap().content);
+        assert!(everything.contains(&summary), "the style summary is in the request");
     }
 
     #[test]
