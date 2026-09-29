@@ -1,0 +1,21 @@
+[package]
+name = "whimpr-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Swift bindings (UniFFI) for the iOS app: the same cleanup pipeline the
+# desktop runs, minus the network call, which the app makes itself.
+# Built into WhimprCore.xcframework by scripts/build-ios.sh.
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[dependencies]
+whimpr-core = { path = "../whimpr-core" }
+uniffi = { version = "0.32.2", features = ["cli"] }
+thiserror = { workspace = true }
