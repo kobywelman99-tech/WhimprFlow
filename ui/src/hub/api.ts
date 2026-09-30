@@ -4,6 +4,10 @@
 
 export type CleanupMode = "raw" | "local" | "open_ai" | "anthropic";
 export type CleanupLevel = "none" | "light" | "medium" | "high";
+// How the target format for a dictation is chosen. "auto" infers it from the
+// focused app (see cleanup/prompts.rs::format_mode_for_app); the other three
+// are manual overrides that always win over that guess.
+export type FormatMode = "auto" | "email" | "general" | "essay_report";
 
 export interface Settings {
   cleanup_mode: CleanupMode;
@@ -14,6 +18,12 @@ export interface Settings {
   openai_base_url: string;
   anthropic_model: string;
   sound_on_start: boolean;
+  // Passively learn the user's writing/speaking voice from raw transcripts
+  // and fold a short summary into the cleanup request — see StylePane. Adds
+  // no extra API calls, only a bit more text to the cleanup call that
+  // already happens.
+  style_learning_enabled: boolean;
+  format_mode: FormatMode;
 }
 
 // Mirrors `permissions::Grant` in src-tauri. A bare boolean couldn't tell
@@ -82,11 +92,26 @@ export const DEFAULT_SETTINGS: Settings = {
   openai_base_url: "",
   anthropic_model: "claude-haiku-4-5",
   sound_on_start: true,
+  style_learning_enabled: true,
+  format_mode: "auto",
 };
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(cmd, args);
+}
+
+// True when actually running inside the Tauri shell. Lets the mutation
+// wrappers below tell "no shell present" (a plain browser dev preview, where
+// swallowing the error is correct so the Hub still renders) apart from "the
+// shell is here and the command genuinely failed" (where swallowing it would
+// make the user think a save succeeded when it silently didn't).
+function isTauri(): boolean {
+  try {
+    return "__TAURI_INTERNALS__" in window;
+  } catch {
+    return false;
+  }
 }
 
 export async function getSettings(): Promise<Settings> {
@@ -100,8 +125,8 @@ export async function getSettings(): Promise<Settings> {
 export async function setSettings(settings: Settings): Promise<void> {
   try {
     await invoke<void>("set_settings", { settings });
-  } catch {
-    /* browser preview — no-op */
+  } catch (e) {
+    if (isTauri()) throw e; // real failure — let the caller surface it
   }
 }
 
@@ -190,8 +215,8 @@ export async function requestInputMonitoring(): Promise<void> {
 export async function setApiKey(provider: "openai" | "anthropic", key: string): Promise<void> {
   try {
     await invoke<void>("set_api_key", { provider, key });
-  } catch {
-    /* browser preview */
+  } catch (e) {
+    if (isTauri()) throw e;
   }
 }
 
@@ -229,16 +254,67 @@ export async function getDictionary(): Promise<DictEntry[]> {
 export async function addDictionaryEntry(correct: string, mishears: string[]): Promise<void> {
   try {
     await invoke<void>("add_dictionary_entry", { correct, mishears });
-  } catch {
-    /* browser preview — no-op */
+  } catch (e) {
+    if (isTauri()) throw e;
   }
 }
 
 export async function removeDictionaryEntry(correct: string): Promise<void> {
   try {
     await invoke<void>("remove_dictionary_entry", { correct });
+  } catch (e) {
+    if (isTauri()) throw e;
+  }
+}
+
+// ── Style ──────────────────────────────────────────────────────────────────
+// Mirrors `whimpr_core::style::StyleSummary` in src-tauri.
+export interface StyleSummary {
+  samples: number;
+  min_samples_to_apply: number;
+  ready: boolean;
+  avg_sentence_words: number;
+  contraction_rate: number;
+  top_fillers: [string, number][];
+  top_phrases: [string, number][];
+  tone_label: string;
+}
+
+export const EMPTY_STYLE_SUMMARY: StyleSummary = {
+  samples: 0,
+  min_samples_to_apply: 5,
+  ready: false,
+  avg_sentence_words: 0,
+  contraction_rate: 0,
+  top_fillers: [],
+  top_phrases: [],
+  tone_label: "",
+};
+
+// The three learned voice profiles — one per style mode. "auto" has no
+// profile of its own; it resolves to email or general depending on the
+// focused app (see `whimpr_core::style::resolve_style_mode`).
+export type StyleProfileMode = "email" | "general" | "essay_report";
+
+export const EMPTY_STYLE_SUMMARIES: Record<StyleProfileMode, StyleSummary> = {
+  email: EMPTY_STYLE_SUMMARY,
+  general: EMPTY_STYLE_SUMMARY,
+  essay_report: EMPTY_STYLE_SUMMARY,
+};
+
+export async function getStyleSummaries(): Promise<Record<StyleProfileMode, StyleSummary>> {
+  try {
+    return await invoke<Record<StyleProfileMode, StyleSummary>>("get_style_summaries");
   } catch {
-    /* browser preview — no-op */
+    return EMPTY_STYLE_SUMMARIES;
+  }
+}
+
+export async function resetStyleProfile(mode: StyleProfileMode): Promise<void> {
+  try {
+    await invoke<void>("reset_style_profile", { mode });
+  } catch (e) {
+    if (isTauri()) throw e;
   }
 }
 

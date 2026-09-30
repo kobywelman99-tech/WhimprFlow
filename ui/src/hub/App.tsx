@@ -7,6 +7,7 @@ import { Home } from "./Home";
 import { Insights } from "./Insights";
 import { DictionaryPane } from "./DictionaryPane";
 import { SettingsPane } from "./SettingsPane";
+import { StylePane } from "./StylePane";
 import { Help } from "./Help";
 import { ComingSoon } from "./ComingSoon";
 import type { IconName } from "./icons";
@@ -106,11 +107,6 @@ const SOON: Partial<Record<Page, { icon: IconName; title: string; desc: string }
     icon: "snippets",
     title: "Snippets",
     desc: "Save reusable phrases and expand them by voice — signatures, addresses, boilerplate.",
-  },
-  style: {
-    icon: "style",
-    title: "Style",
-    desc: "Tune WhimprFlow's tone and formatting so cleaned-up text always sounds like you.",
   },
   transforms: {
     icon: "transforms",
@@ -223,9 +219,21 @@ export function App() {
     return () => unlisten?.();
   }, []);
 
+  // Shown by DictionaryPane/SettingsPane when a save genuinely fails inside a
+  // running Tauri shell (as opposed to the browser-dev-preview case, which
+  // `api.ts` still swallows) — reuses the same banner as pipeline failures so
+  // there's one consistent place a save/remove error becomes visible instead
+  // of vanishing silently.
+  const reportError = (headline: string, detail: string) => {
+    setLastError({ headline, detail });
+    setErrorDismissed(false);
+  };
+
   const update = (s: Settings) => {
     setLocalSettings(s);
-    void setSettings(s);
+    setSettings(s).catch(() =>
+      reportError("Settings didn't save", "Your change wasn't saved — try again in a moment."),
+    );
   };
 
   // Gate the app behind the setup wizard until the required permissions are granted.
@@ -279,9 +287,18 @@ export function App() {
           <div style={{ padding: "36px 44px", margin: "0 auto", maxWidth: 1120 }}>
             {page === "home" && <Home />}
             {page === "insights" && <Insights />}
-            {page === "dictionary" && <DictionaryPane />}
+            {page === "dictionary" && <DictionaryPane onError={reportError} />}
+            {page === "style" && (
+              <StylePane settings={settings} onChange={update} onError={reportError} />
+            )}
             {page === "settings" && (
-              <SettingsPane settings={settings} onChange={update} status={status} refresh={refresh} />
+              <SettingsPane
+                settings={settings}
+                onChange={update}
+                status={status}
+                refresh={refresh}
+                onError={reportError}
+              />
             )}
             {page === "help" && <Help />}
             {soon && <ComingSoon icon={soon.icon} title={soon.title} desc={soon.desc} />}

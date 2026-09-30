@@ -48,7 +48,13 @@ function Tabs({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
   );
 }
 
-function AddForm({ onDone }: { onDone: () => void }) {
+function AddForm({
+  onDone,
+  onError,
+}: {
+  onDone: () => void;
+  onError: (headline: string, detail: string) => void;
+}) {
   const [correct, setCorrect] = useState("");
   const [heard, setHeard] = useState("");
   const inputStyle = {
@@ -70,8 +76,12 @@ function AddForm({ onDone }: { onDone: () => void }) {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-    await addDictionaryEntry(word, mishears);
-    onDone();
+    try {
+      await addDictionaryEntry(word, mishears);
+      onDone();
+    } catch {
+      onError("Word didn't save", `"${word}" wasn't added — try again in a moment.`);
+    }
   };
 
   return (
@@ -167,7 +177,11 @@ function EntryRow({ entry, onRemove }: { entry: DictEntry; onRemove: () => void 
   );
 }
 
-export function DictionaryPane() {
+export function DictionaryPane({
+  onError,
+}: {
+  onError: (headline: string, detail: string) => void;
+}) {
   const [entries, setEntries] = useState<DictEntry[]>([]);
   const [tab, setTab] = useState<Tab>("all");
   const [query, setQuery] = useState("");
@@ -179,8 +193,12 @@ export function DictionaryPane() {
   }, []);
 
   const remove = async (correct: string) => {
-    await removeDictionaryEntry(correct);
-    await load();
+    try {
+      await removeDictionaryEntry(correct);
+      await load();
+    } catch {
+      onError("Word wasn't removed", `"${correct}" is still in your dictionary — try again.`);
+    }
   };
 
   const q = query.trim().toLowerCase();
@@ -269,6 +287,7 @@ export function DictionaryPane() {
             setAdding(false);
             void load();
           }}
+          onError={onError}
         />
       )}
 

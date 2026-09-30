@@ -13,6 +13,17 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use whimpr_core::diagnostics::InjectionFailure;
 
+/// A poisoned `Mutex` still holds valid data — recovering it means a panic
+/// elsewhere doesn't also take down every future diagnostic report.
+trait PoisonRecover<T> {
+    fn lock_recover(&self) -> std::sync::MutexGuard<'_, T>;
+}
+impl<T> PoisonRecover<T> for Mutex<T> {
+    fn lock_recover(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 #[cfg(target_os = "macos")]
 const PLATFORM: whimpr_core::diagnostics::Platform = whimpr_core::diagnostics::Platform::MacOs;
 #[cfg(target_os = "windows")]
@@ -48,7 +59,7 @@ pub fn report(app: &AppHandle, failure: InjectionFailure) {
     let diag = failure.diagnose(PLATFORM);
     eprintln!("[whimpr] ⚠ {}: {}", diag.headline, diag.detail);
     let dto = ErrorDto { headline: diag.headline, detail: diag.detail };
-    *LAST_ERROR.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(dto.clone());
+    *LAST_ERROR.get_or_init(|| Mutex::new(None)).lock_recover() = Some(dto.clone());
     let _ = app.emit_to(OVERLAY_LABEL, "whimpr://flowbar/state", BarPayload { state: "error" });
     let _ = app.emit("whimpr://error", dto);
 
@@ -59,10 +70,25 @@ pub fn report(app: &AppHandle, failure: InjectionFailure) {
     });
 }
 
+/// Report a non-blocking notice: something degraded but text still made it to
+/// the cursor (e.g. cleanup was skipped and the raw transcript was pasted
+/// instead) — as opposed to [`report`], which is for the pipeline actually
+/// failing to deliver text. Unlike `report`, this does NOT hijack the pill
+/// into its `error` state (that would misrepresent a successful-but-uncleaned
+/// paste as a failure, and would cut the normal "done" flash short); it only
+/// remembers the message for the Hub and broadcasts `whimpr://error` so an
+/// open Hub window can show it immediately too.
+pub fn notice(app: &AppHandle, headline: impl Into<String>, detail: impl Into<String>) {
+    let dto = ErrorDto { headline: headline.into(), detail: detail.into() };
+    eprintln!("[whimpr] ⓘ {}: {}", dto.headline, dto.detail);
+    *LAST_ERROR.get_or_init(|| Mutex::new(None)).lock_recover() = Some(dto.clone());
+    let _ = app.emit("whimpr://error", dto);
+}
+
 /// The most recent diagnostic, so the Hub can show it even after the pill
 /// has already reverted to idle (e.g. Settings was opened after the fact).
 pub fn last_error() -> Option<ErrorDto> {
-    LAST_ERROR.get().and_then(|m| m.lock().unwrap().clone())
+    LAST_ERROR.get().and_then(|m| m.lock_recover().clone())
 }
 
 /// Clear the remembered error — called after a dictation succeeds, so a
@@ -70,6 +96,6 @@ pub fn last_error() -> Option<ErrorDto> {
 #[allow(dead_code)]
 pub fn clear_last_error() {
     if let Some(m) = LAST_ERROR.get() {
-        *m.lock().unwrap() = None;
+        *m.lock_recover() = None;
     }
 }

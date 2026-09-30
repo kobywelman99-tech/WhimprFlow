@@ -51,6 +51,27 @@ pub fn default_level() -> Level {
     }
 }
 
+/// Which learned voice profile a style call reads/writes — mirrors
+/// `whimpr_core::style::StyleMode`. The desktop Hub also lets a dictation's
+/// mode be auto-detected from the focused app; iOS currently always passes
+/// `General` (see `StyleModel.swift`) until it has its own mode picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum StyleMode {
+    Email,
+    General,
+    EssayReport,
+}
+
+impl From<StyleMode> for whimpr_core::style::StyleMode {
+    fn from(mode: StyleMode) -> Self {
+        match mode {
+            StyleMode::Email => whimpr_core::style::StyleMode::Email,
+            StyleMode::General => whimpr_core::style::StyleMode::General,
+            StyleMode::EssayReport => whimpr_core::style::StyleMode::EssayReport,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct Vocab {
     pub correct: String,
@@ -300,29 +321,31 @@ impl StyleProfile {
         Arc::new(Self { path, store: Mutex::new(store) })
     }
 
-    /// Learns from one dictation or piece of writing.
-    pub fn observe(&self, text: String) -> Result<(), StyleError> {
-        self.observe_all(vec![text]).map(|_| ())
+    /// Learns from one dictation or piece of writing, into `mode`'s profile.
+    pub fn observe(&self, text: String, mode: StyleMode) -> Result<(), StyleError> {
+        self.observe_all(vec![text], mode).map(|_| ())
     }
 
-    /// Learns from many samples (an import) with one save. Returns how many
-    /// had any words.
-    pub fn observe_all(&self, samples: Vec<String>) -> Result<u32, StyleError> {
+    /// Learns from many samples (an import) with one save, into `mode`'s
+    /// profile. Returns how many had any words.
+    pub fn observe_all(&self, samples: Vec<String>, mode: StyleMode) -> Result<u32, StyleError> {
+        let mode = mode.into();
         let mut store = self.lock();
-        let before = store.samples;
+        let before = store.summary(mode).samples;
         for sample in &samples {
-            store.observe(sample);
+            store.observe(mode, sample);
         }
-        let learned = store.samples - before;
+        let learned = store.summary(mode).samples - before;
         if learned > 0 {
             self.save(&store)?;
         }
         Ok(learned)
     }
 
-    pub fn overview(&self) -> StyleOverview {
+    pub fn overview(&self, mode: StyleMode) -> StyleOverview {
+        let mode = mode.into();
         let store = self.lock();
-        let summary = store.summary();
+        let summary = store.summary(mode);
         let counts = |items: Vec<(String, u32)>| {
             items.into_iter().map(|(phrase, count)| PhraseCount { phrase, count }).collect()
         };
@@ -335,18 +358,18 @@ impl StyleProfile {
             top_fillers: counts(summary.top_fillers),
             top_phrases: counts(summary.top_phrases),
             tone_label: summary.tone_label,
-            prompt_summary: store.summary_for_prompt(),
+            prompt_summary: store.summary_for_prompt(mode),
         }
     }
 
-    /// The one-line description for the cleanup prompt, once there's enough.
-    pub fn prompt_summary(&self) -> Option<String> {
-        self.lock().summary_for_prompt()
+    /// The one-line description for `mode`'s cleanup prompt, once there's enough.
+    pub fn prompt_summary(&self, mode: StyleMode) -> Option<String> {
+        self.lock().summary_for_prompt(mode.into())
     }
 
-    pub fn reset(&self) -> Result<(), StyleError> {
+    pub fn reset(&self, mode: StyleMode) -> Result<(), StyleError> {
         let mut store = self.lock();
-        store.reset();
+        store.reset(mode.into());
         self.save(&store)
     }
 }
@@ -391,15 +414,18 @@ mod tests {
     #[test]
     fn style_needs_five_samples_before_it_shapes_cleanup() {
         let style = StyleProfile::open(temp_path());
-        assert_eq!(style.observe_all(CASUAL[..4].iter().map(|s| s.to_string()).collect()).unwrap(), 4);
-        assert!(!style.overview().ready);
-        assert!(style.prompt_summary().is_none());
+        assert_eq!(
+            style.observe_all(CASUAL[..4].iter().map(|s| s.to_string()).collect(), StyleMode::General).unwrap(),
+            4
+        );
+        assert!(!style.overview(StyleMode::General).ready);
+        assert!(style.prompt_summary(StyleMode::General).is_none());
 
-        style.observe(CASUAL[4].into()).unwrap();
-        let overview = style.overview();
+        style.observe(CASUAL[4].into(), StyleMode::General).unwrap();
+        let overview = style.overview(StyleMode::General);
         assert!(overview.ready);
         assert!(overview.contraction_rate > 0.9, "all contracted: {}", overview.contraction_rate);
-        let summary = style.prompt_summary().expect("a summary once ready");
+        let summary = style.prompt_summary(StyleMode::General).expect("a summary once ready");
         assert!(summary.contains("contractions"), "{summary}");
         assert_eq!(overview.prompt_summary.as_deref(), Some(summary.as_str()));
     }
@@ -408,26 +434,39 @@ mod tests {
     fn style_persists_and_resets() {
         let path = temp_path();
         StyleProfile::open(path.clone())
-            .observe_all(CASUAL.iter().map(|s| s.to_string()).collect())
+            .observe_all(CASUAL.iter().map(|s| s.to_string()).collect(), StyleMode::General)
             .unwrap();
         let reopened = StyleProfile::open(path.clone());
-        assert_eq!(reopened.overview().samples, CASUAL.len() as u32);
+        assert_eq!(reopened.overview(StyleMode::General).samples, CASUAL.len() as u32);
 
-        reopened.reset().unwrap();
-        assert_eq!(StyleProfile::open(path).overview().samples, 0);
+        reopened.reset(StyleMode::General).unwrap();
+        assert_eq!(StyleProfile::open(path).overview(StyleMode::General).samples, 0);
+    }
+
+    #[test]
+    fn style_keeps_modes_independent() {
+        let style = StyleProfile::open(temp_path());
+        style.observe_all(CASUAL.iter().map(|s| s.to_string()).collect(), StyleMode::Email).unwrap();
+        assert!(style.overview(StyleMode::Email).ready);
+        assert_eq!(style.overview(StyleMode::EssayReport).samples, 0);
     }
 
     #[test]
     fn style_skips_empty_samples() {
         let style = StyleProfile::open(temp_path());
-        assert_eq!(style.observe_all(vec!["".into(), "   ".into(), "hello there".into()]).unwrap(), 1);
+        assert_eq!(
+            style
+                .observe_all(vec!["".into(), "   ".into(), "hello there".into()], StyleMode::General)
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
     fn style_summary_reaches_the_prompt() {
         let style = StyleProfile::open(temp_path());
-        style.observe_all(CASUAL.iter().map(|s| s.to_string()).collect()).unwrap();
-        let summary = style.prompt_summary().unwrap();
+        style.observe_all(CASUAL.iter().map(|s| s.to_string()).collect(), StyleMode::General).unwrap();
+        let summary = style.prompt_summary(StyleMode::General).unwrap();
         let request = prepare_cleanup("um so send it tonight".into(), Level::Light, vec![], None, Some(summary.clone()));
         let everything = format!("{}\n{}", request.system, request.messages.last().unwrap().content);
         assert!(everything.contains(&summary), "the style summary is in the request");

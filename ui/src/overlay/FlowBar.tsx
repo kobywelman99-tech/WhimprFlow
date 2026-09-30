@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { palette, pillFill, geometry, font } from "../tokens/values";
 
 // Visual states, mirroring the Rust `BarState`.
@@ -15,6 +15,10 @@ type StateEvent = { state: BarState };
 type WaveformEvent = { bars: number[] };
 // Mirrors `diag::ErrorDto` in src-tauri/src/diag.rs.
 type ErrorEvent = { headline: string; detail: string };
+// Live raw transcript from the local Whisper pass, re-decoded every ~900ms
+// while recording — NOT the cleaned-up text (that only arrives once, from
+// `whimpr://transcript`, after the cloud cleanup pass runs at release).
+type TranscriptEvent = { text: string };
 
 async function tauriListen<T>(event: string, cb: (payload: T) => void): Promise<() => void> {
   try {
@@ -22,6 +26,20 @@ async function tauriListen<T>(event: string, cb: (payload: T) => void): Promise<
     return await listen<T>(event, (e) => cb(e.payload as T));
   } catch {
     return () => {};
+  }
+}
+
+// Tell the Rust side to resize + re-anchor the actual OS overlay window so
+// its bounds match the pill's current on-screen size (the window is a tight
+// hit-test box around the pill, not a full-screen canvas — see build_overlay
+// in src-tauri/src/lib.rs).
+async function resizeOverlayWindow(width: number, height: number): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("resize_overlay", { width, height });
+  } catch {
+    // Best-effort — the pill still renders correctly even if the native
+    // window doesn't track it (e.g. running outside Tauri in dev/browser).
   }
 }
 
@@ -74,10 +92,26 @@ function DottedWaveform({ bars }: { bars: number[] }) {
   return <canvas ref={canvasRef} style={{ width: "100%", height: 28 }} />;
 }
 
+// Fire-and-forget invoke of a no-payload Tauri command (cancel/stop).
+async function tauriInvoke(cmd: string): Promise<void> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke(cmd);
+  } catch {
+    // no-op outside Tauri (e.g. browser dev preview)
+  }
+}
+
+// Both buttons sit on top of the pill's drag region (see FlowBar's outer div)
+// — stopPropagation on mousedown keeps a click from also being read as the
+// start of a window drag.
 function CancelButton() {
   return (
     <div
       title="Cancel (Esc)"
+      role="button"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={() => tauriInvoke("cancel_dictation")}
       style={{
         flex: "0 0 auto",
         width: 26,
@@ -90,6 +124,7 @@ function CancelButton() {
         color: "#fff",
         fontSize: 15,
         lineHeight: 1,
+        cursor: "pointer",
       }}
     >
       ✕
@@ -101,6 +136,9 @@ function StopButton() {
   return (
     <div
       title="Stop"
+      role="button"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={() => tauriInvoke("stop_dictation")}
       style={{
         flex: "0 0 auto",
         width: 26,
@@ -110,6 +148,7 @@ function StopButton() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
+        cursor: "pointer",
       }}
     >
       <div style={{ width: 9, height: 9, borderRadius: 2, background: "#fff" }} />
@@ -125,18 +164,78 @@ export function FlowBar() {
   // an older build, or a future ShowBar(Error) call that doesn't go through
   // `diag::report`).
   const [errorText, setErrorText] = useState<ErrorEvent | null>(null);
+  const [partialText, setPartialText] = useState("");
+  // Measured height (px) of the wrapped live-transcript text, so the pill —
+  // and the real OS window behind it — can grow to fit the whole utterance
+  // instead of clipping it to one line.
+  const [textH, setTextH] = useState(0);
+  const textRef = useRef<HTMLDivElement | null>(null);
+  // True from mousedown-on-the-pill until mouseup, so a native window "moved"
+  // event during that window is treated as a user drag (and persisted) —
+  // as opposed to one of our own programmatic `resize_overlay`/reset calls,
+  // which also move the window but shouldn't be saved as a new position.
+  const draggingRef = useRef(false);
+  const saveTimeoutRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     let un1: (() => void) | undefined;
     let un2: (() => void) | undefined;
     let un3: (() => void) | undefined;
-    tauriListen<StateEvent>("whimpr://flowbar/state", (p) => setState(p.state)).then((u) => (un1 = u));
+    let un4: (() => void) | undefined;
+    tauriListen<StateEvent>("whimpr://flowbar/state", (p) => {
+      setState(p.state);
+      if (p.state === "idle" || p.state === "recording") {
+        setPartialText("");
+        setTextH(0);
+      }
+    }).then((u) => (un1 = u));
     tauriListen<WaveformEvent>("whimpr://audio/waveform", (p) => setBars(p.bars)).then((u) => (un2 = u));
     tauriListen<ErrorEvent>("whimpr://error", (p) => setErrorText(p)).then((u) => (un3 = u));
+    tauriListen<TranscriptEvent>("whimpr://transcript/partial", (p) => setPartialText(p.text)).then(
+      (u) => (un4 = u),
+    );
     return () => {
       un1?.();
       un2?.();
       un3?.();
+      un4?.();
+    };
+  }, []);
+
+  // Drag-to-move: the pill has `data-tauri-drag-region`, which lets the OS
+  // move the (undecorated) window natively on mousedown-drag. We just need
+  // to notice when that happened and persist the resulting position so it
+  // sticks — see `save_overlay_position` in src-tauri/src/lib.rs.
+  useEffect(() => {
+    const onUp = () => {
+      draggingRef.current = false;
+    };
+    window.addEventListener("mouseup", onUp);
+    let unmoved: (() => void) | undefined;
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const { invoke } = await import("@tauri-apps/api/core");
+        const win = getCurrentWindow();
+        unmoved = await win.onMoved(() => {
+          if (!draggingRef.current) return;
+          window.clearTimeout(saveTimeoutRef.current);
+          saveTimeoutRef.current = window.setTimeout(async () => {
+            try {
+              const pos = await win.outerPosition();
+              await invoke("save_overlay_position", { x: pos.x, y: pos.y });
+            } catch {
+              // Best-effort; the drag itself already worked visually either way.
+            }
+          }, 150);
+        });
+      } catch {
+        // Not running under Tauri (e.g. plain browser dev preview) — no-op.
+      }
+    })();
+    return () => {
+      window.removeEventListener("mouseup", onUp);
+      unmoved?.();
     };
   }, []);
 
@@ -156,16 +255,59 @@ export function FlowBar() {
   // Pill dimensions per state. Error gets extra width so the specific
   // headline (e.g. "Accessibility permission needed") isn't clipped —
   // truncating it back down to "Something's off" would defeat the point.
+  //
+  // Recording is fixed-width but grows TALL: the live transcript wraps
+  // instead of truncating, and the pill's height tracks the measured text
+  // height (see `textH`) up to RECORDING_MAX_H, so the user can watch their
+  // whole utterance build up rather than only ever seeing the last few words.
+  // Past the cap it scrolls, auto-pinned to the newest line.
+  const RECORDING_W = 340;
+  const RECORDING_MAX_H = 260;
+  const recordingH = partialText ? Math.min(RECORDING_MAX_H, Math.max(44, textH + 24)) : 44;
   const dims = isIdle
     ? { w: 76, h: 16 }
     : recording
-      ? { w: 250, h: 44 }
+      ? { w: RECORDING_W, h: recordingH }
       : isError
         ? { w: 280, h: 36 }
         : { w: 180, h: 36 };
 
+  // Keep the actual OS overlay window's bounds matching the pill so it isn't
+  // clipped at the window edge, and so it stays anchored bottom-center as it
+  // grows (see `resize_overlay` in src-tauri/src/lib.rs).
+  useEffect(() => {
+    resizeOverlayWindow(dims.w, dims.h);
+  }, [dims.w, dims.h]);
+
+  // Re-measure the wrapped transcript's natural height whenever it changes,
+  // and keep the view scrolled to the newest line once it's tall enough to
+  // scroll.
+  useLayoutEffect(() => {
+    const el = textRef.current;
+    if (!el) return;
+    setTextH(el.scrollHeight);
+    el.scrollTop = el.scrollHeight;
+  }, [partialText]);
+
   return (
     <div
+      // "deep" (not bare/"true") because Tauri's drag script only starts a
+      // drag when the exact clicked element carries the attribute, not an
+      // ancestor — the visible pill is a nested child of this full-window
+      // wrapper, so a bare attribute here never actually matched a click.
+      data-tauri-drag-region="deep"
+      title="Drag to move · double-click to reset position"
+      onMouseDown={() => {
+        draggingRef.current = true;
+      }}
+      onDoubleClick={async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("reset_overlay_position");
+        } catch {
+          // no-op outside Tauri
+        }
+      }}
       style={{
         position: "fixed",
         inset: 0,
@@ -174,6 +316,7 @@ export function FlowBar() {
         justifyContent: "center",
         fontFamily: font.ui,
         userSelect: "none",
+        cursor: "move",
       }}
     >
       <div
@@ -181,12 +324,12 @@ export function FlowBar() {
         title={isError ? errorText?.detail : undefined}
         style={{
           display: "flex",
-          alignItems: "center",
+          alignItems: recording && partialText ? "flex-start" : "center",
           justifyContent: recording ? "space-between" : "center",
           gap: 10,
           height: dims.h,
           width: dims.w,
-          padding: recording ? "0 8px" : 0,
+          padding: recording ? (partialText ? "9px 8px" : "0 8px") : 0,
           background: pillFill.base,
           border: `1px solid rgba(255,255,255,0.10)`,
           borderRadius: 9999,
@@ -200,8 +343,34 @@ export function FlowBar() {
         {isIdle ? null : recording ? (
           <>
             <CancelButton />
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <DottedWaveform bars={bars} />
+            <div style={{ flex: 1, minWidth: 0, alignSelf: partialText ? "stretch" : "center" }}>
+              {partialText ? (
+                // Live raw transcript from the local (free, no-API-cost) Whisper
+                // pass — re-decoded every ~900ms while recording. Wraps and
+                // grows the pill (see `dims`/`textH` above) so the whole
+                // utterance stays visible instead of only the newest words;
+                // once it exceeds RECORDING_MAX_H this scrolls, auto-pinned to
+                // the latest line. This is NOT the cleaned-up text — that
+                // still only appears once, at release, via the existing
+                // cloud cleanup pipeline.
+                <div
+                  ref={textRef}
+                  data-tauri-drag-region="false"
+                  style={{
+                    maxHeight: 260 - 24,
+                    overflowY: "auto",
+                    whiteSpace: "normal",
+                    wordBreak: "break-word",
+                    color: palette.pillText,
+                    fontSize: 13,
+                    lineHeight: "18px",
+                  }}
+                >
+                  {partialText}
+                </div>
+              ) : (
+                <DottedWaveform bars={bars} />
+              )}
             </div>
             <StopButton />
           </>

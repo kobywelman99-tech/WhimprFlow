@@ -18,9 +18,15 @@ final class StyleModel {
     @ObservationIgnored private let profile: StyleProfile
     @ObservationIgnored private let defaults: UserDefaults
 
+    // whimpr-core now learns a separate voice per dictation mode (Email /
+    // General / Essay-Report). iOS doesn't have a mode picker yet, so this
+    // model always reads/writes the General bucket for now — see the iOS FFI
+    // follow-up note in the desktop "Dictation Style Modes" plan.
+    private let mode: StyleMode = .general
+
     init(fileURL: URL = StyleModel.defaultFileURL, defaults: UserDefaults = .standard) {
         profile = StyleProfile.open(path: fileURL.path)
-        overview = profile.overview()
+        overview = profile.overview(mode: .general)
         self.defaults = defaults
         enabled = defaults.object(forKey: "styleLearning") as? Bool ?? true
     }
@@ -40,8 +46,8 @@ final class StyleModel {
     func observe(_ raw: String) {
         guard enabled else { return }
         do {
-            try profile.observe(text: raw)
-            overview = profile.overview()
+            try profile.observe(text: raw, mode: mode)
+            overview = profile.overview(mode: mode)
         } catch {
             log.error("\(error.localizedDescription, privacy: .public)")
         }
@@ -51,14 +57,14 @@ final class StyleModel {
     /// many samples were used.
     @discardableResult
     func learn(from samples: [String]) throws -> Int {
-        let learned = try readable { try profile.observeAll(samples: samples) }
-        overview = profile.overview()
+        let learned = try readable { try profile.observeAll(samples: samples, mode: mode) }
+        overview = profile.overview(mode: mode)
         return Int(learned)
     }
 
     func reset() throws {
-        try readable { try profile.reset() }
-        overview = profile.overview()
+        try readable { try profile.reset(mode: mode) }
+        overview = profile.overview(mode: mode)
     }
 
     struct StyleSaveError: LocalizedError {

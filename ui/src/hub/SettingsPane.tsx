@@ -43,7 +43,7 @@ function KeyField({
 }: {
   label: string;
   configured: boolean;
-  onSave: (key: string) => void;
+  onSave: (key: string) => Promise<void>;
 }) {
   const [value, setValue] = useState("");
   const [saved, setSaved] = useState(false);
@@ -76,9 +76,11 @@ function KeyField({
         />
         <Button
           onClick={() => {
-            onSave(value);
-            setValue("");
-            setSaved(true);
+            const toSave = value;
+            void onSave(toSave).then(() => {
+              setValue("");
+              setSaved(true);
+            });
           }}
         >
           Save
@@ -124,12 +126,23 @@ export function SettingsPane({
   onChange,
   status,
   refresh,
+  onError,
 }: {
   settings: Settings;
   onChange: (s: Settings) => void;
   status: Status;
   refresh: () => void;
+  onError: (headline: string, detail: string) => void;
 }) {
+  const saveKey = (provider: "openai" | "anthropic", label: string) => (k: string) =>
+    setApiKey(provider, k)
+      .then(() => {
+        setTimeout(refresh, 400);
+      })
+      .catch(() => {
+        onError(`${label} key didn't save`, "Try pasting it again in a moment.");
+        throw new Error("key save failed"); // keep KeyField's "Saved ✓" from showing
+      });
   return (
     <div style={{ maxWidth: 720 }}>
       <PageTitle>Settings</PageTitle>
@@ -148,10 +161,7 @@ export function SettingsPane({
         <KeyField
           label="OpenAI API key"
           configured={status.has_openai_key}
-          onSave={(k) => {
-            setApiKey("openai", k);
-            setTimeout(refresh, 400);
-          }}
+          onSave={saveKey("openai", "OpenAI")}
         />
         <div style={{ marginTop: 12, display: "flex", gap: 8 }}>
           <div style={{ flex: 1 }}>
@@ -204,10 +214,7 @@ export function SettingsPane({
         <KeyField
           label="Anthropic API key"
           configured={status.has_anthropic_key}
-          onSave={(k) => {
-            setApiKey("anthropic", k);
-            setTimeout(refresh, 400);
-          }}
+          onSave={saveKey("anthropic", "Anthropic")}
         />
       </Card>
 

@@ -331,6 +331,97 @@ mod tests {
     }
 
     #[test]
+    fn cancel_from_finalizing_discards_and_returns_idle() {
+        let mut m = StateMachine::new();
+        m.step(down(BindingId::PushToTalk, 0));
+        m.step(up(BindingId::PushToTalk, 1_000)); // held long enough -> Finalizing
+        assert!(matches!(m.state(), DictationState::Finalizing { .. }));
+
+        let a = m.step(Input::Trigger(TriggerToken::Cancel { at_ms: 1_100 }));
+        assert!(
+            a.iter().any(|x| matches!(x, Action::DiscardCapture { .. })),
+            "cancelling a Finalizing session must still discard its capture"
+        );
+        assert!(a.iter().any(|x| matches!(x, Action::ShowBar(BarState::Cancelled))));
+        assert!(matches!(m.state(), DictationState::Idle));
+    }
+
+    #[test]
+    fn cancel_from_awaiting_lock_returns_idle_without_a_capture_to_discard() {
+        let mut m = StateMachine::new();
+        m.step(down(BindingId::PushToTalk, 0));
+        m.step(up(BindingId::PushToTalk, 50)); // quick tap -> AwaitingLock
+        assert!(matches!(m.state(), DictationState::AwaitingLock { .. }));
+
+        // AwaitingLock has no live capture (the tap's audio was already
+        // discarded when it entered this state) — cancelling here must not
+        // emit a second, bogus DiscardCapture for a session that no longer
+        // exists.
+        let a = m.step(Input::Trigger(TriggerToken::Cancel { at_ms: 100 }));
+        assert!(!a.iter().any(|x| matches!(x, Action::DiscardCapture { .. })));
+        assert!(a.iter().any(|x| matches!(x, Action::ShowBar(BarState::Cancelled))));
+        assert!(matches!(m.state(), DictationState::Idle));
+    }
+
+    #[test]
+    fn second_press_after_the_double_tap_window_is_dropped_until_a_tick_resets_it() {
+        // This is the actual (slightly surprising) reducer behavior: a Down
+        // that arrives in AwaitingLock but *after* DOUBLE_TAP_MS matches
+        // neither the "lock" guard (window elapsed) nor any other Recording
+        // arm, so it falls through to the wildcard no-op — it does NOT start
+        // a fresh independent tap by itself. In the real app this is masked
+        // by the ~100ms background Tick loop (hotkey.rs) reliably flipping
+        // AwaitingLock back to Idle well before a human's second press could
+        // land, but the reducer alone does not guarantee that ordering.
+        let mut m = StateMachine::new();
+        m.step(down(BindingId::PushToTalk, 0));
+        m.step(up(BindingId::PushToTalk, 50)); // -> AwaitingLock { tap_up_ms: 50 }
+
+        let late = 50 + DOUBLE_TAP_MS + 1;
+        let a = m.step(down(BindingId::PushToTalk, late));
+        assert!(a.is_empty(), "a late second press with no intervening Tick is dropped");
+        assert!(
+            matches!(m.state(), DictationState::AwaitingLock { .. }),
+            "the machine stays stuck in AwaitingLock until a Tick observes the timeout"
+        );
+
+        // Once a Tick does observe the elapsed window, it resets to Idle...
+        let a = m.step(Input::Tick { now_ms: late });
+        assert!(a.iter().any(|x| matches!(x, Action::ShowBar(BarState::Idle))));
+        assert!(matches!(m.state(), DictationState::Idle));
+
+        // ...and a subsequent tap now behaves as an independent, fresh tap —
+        // once past the cooldown the timeout-tick itself starts (the tick
+        // that resets AwaitingLock -> Idle sets `last_end_ms` exactly like a
+        // cancel does, so an immediate retry is still cooldown-gated).
+        let a = m.step(down(BindingId::PushToTalk, late + COOLDOWN_MS + 1));
+        assert!(matches!(a[0], Action::StartCapture { .. }));
+        assert!(matches!(m.state(), DictationState::Recording { mode: RecordMode::PushToTalk, .. }));
+    }
+
+    #[test]
+    fn cooldown_does_not_apply_after_a_normal_pipeline_completion() {
+        // Cooldown only guards against retriggering right after a *cancel*
+        // (or the AwaitingLock timeout) — `on_pipeline`'s Committed/Failed
+        // arms never touch `last_end_ms`. Confirm a press immediately after a
+        // normal, successful dictation is NOT suppressed the way it would be
+        // after a cancel.
+        let mut m = StateMachine::new();
+        m.step(down(BindingId::PushToTalk, 0));
+        m.step(up(BindingId::PushToTalk, 1_000)); // -> Finalizing
+        m.step(Input::Pipeline(PipelineEvent::Committed { session: SessionId(1) }));
+        assert!(matches!(m.state(), DictationState::Idle));
+
+        // Immediately (0ms later) — well inside what would be a cooldown
+        // window after a cancel — a new press must still start recording.
+        let a = m.step(down(BindingId::PushToTalk, 1_000));
+        assert!(
+            a.iter().any(|x| matches!(x, Action::StartCapture { .. })),
+            "a press right after a normal completion must not be swallowed by cooldown"
+        );
+    }
+
+    #[test]
     fn session_cap_warns_then_auto_stops() {
         let mut m = StateMachine::new();
         m.step(down(BindingId::HandsFree, 0)); // locked, no auto-release

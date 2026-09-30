@@ -51,6 +51,7 @@ static OPENAI: OnceLock<Mutex<Option<whimpr_cleanup::OpenAiProvider>>> = OnceLoc
 static SETTINGS: OnceLock<Mutex<whimpr_core::Settings>> = OnceLock::new();
 static DICTIONARY: OnceLock<Mutex<whimpr_core::DictionaryStore>> = OnceLock::new();
 static STATS: OnceLock<Mutex<whimpr_core::StatsStore>> = OnceLock::new();
+static STYLE: OnceLock<Mutex<whimpr_core::StyleStore>> = OnceLock::new();
 
 fn support_dir() -> std::path::PathBuf {
     // %APPDATA%\WhimprFlow
@@ -65,6 +66,12 @@ fn dict_path() -> std::path::PathBuf {
 }
 fn stats_path() -> std::path::PathBuf {
     support_dir().join("stats.json")
+}
+fn style_path() -> std::path::PathBuf {
+    support_dir().join("style.json")
+}
+fn credentials_path() -> std::path::PathBuf {
+    support_dir().join("credentials.json")
 }
 fn whisper_model_path() -> std::path::PathBuf {
     let dir = support_dir().join("models");
@@ -181,10 +188,19 @@ fn clean_transcript(raw: &str) -> String {
         .get()
         .map(|d| d.lock().unwrap().prefilter(&raw_norm, 15))
         .unwrap_or_default();
+    let app_bundle_id = foreground_app();
+    let style_mode = whimpr_core::resolve_style_mode(settings.format_mode, app_bundle_id.as_deref());
+    let style_summary = if settings.style_learning_enabled {
+        STYLE.get().and_then(|m| m.lock().unwrap().summary_for_prompt(style_mode))
+    } else {
+        None
+    };
     let ctx = CleanupContext {
         level,
         vocab,
-        app_bundle_id: foreground_app(),
+        app_bundle_id,
+        style_summary,
+        format_mode: settings.format_mode,
         ..Default::default()
     };
     let run_local = || -> Option<anyhow::Result<String>> {
@@ -287,6 +303,18 @@ fn on_ptt_up() {
         let pcm = whimpr_audio::resample_to_16k(&res.samples, res.sample_rate);
         match asr.transcribe(&pcm) {
             Ok(t) => {
+                let settings_now = current_settings_inner();
+                if settings_now.style_learning_enabled {
+                    if let Some(m) = STYLE.get() {
+                        let style_mode = whimpr_core::resolve_style_mode(
+                            settings_now.format_mode,
+                            foreground_app().as_deref(),
+                        );
+                        let mut store = m.lock().unwrap();
+                        store.observe(style_mode, &t.text);
+                        let _ = store.save(&style_path());
+                    }
+                }
                 let text = clean_transcript(&t.text);
                 if !text.is_empty() {
                     if let Err(e) = paste_text(&text) {
@@ -313,6 +341,31 @@ fn on_ptt_up() {
                 }
             }
         }
+    });
+}
+
+/// End the in-progress dictation as if the PTT key had been released — the
+/// pill's stop button does this. ⚠️ Same unverified status as the rest of
+/// this file (see module doc comment).
+pub fn stop_dictation() {
+    on_ptt_up();
+}
+
+/// Cancel the in-progress dictation: stop capture and discard the audio
+/// without transcribing or pasting — the pill's ✕ button does this.
+pub fn cancel_dictation() {
+    if !RECORDING.swap(false, Ordering::SeqCst) {
+        return; // wasn't recording
+    }
+    emit_bar("cancelled");
+    if let Some(slot) = CAPTURE.get() {
+        if let Some(handle) = slot.lock().unwrap().take() {
+            let _ = handle.stop();
+        }
+    }
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(500));
+        emit_bar("idle");
     });
 }
 
@@ -379,6 +432,7 @@ pub fn install(app: AppHandle) {
     let _ = SETTINGS.set(Mutex::new(whimpr_core::Settings::load(&settings_path())));
     let _ = DICTIONARY.set(Mutex::new(whimpr_core::DictionaryStore::load(&dict_path())));
     let _ = STATS.set(Mutex::new(whimpr_core::StatsStore::load(&stats_path())));
+    let _ = STYLE.set(Mutex::new(whimpr_core::StyleStore::load(&style_path())));
     let _ = OPENAI.set(Mutex::new(None));
     let _ = LOCAL.set(Mutex::new(None));
     rebuild_providers();
@@ -431,10 +485,8 @@ pub fn rebuild_providers() {
     let settings = current_settings_inner();
     let model = settings.openai_model;
     let base_url = settings.openai_base_url;
-    let key = keyring::Entry::new("com.whimpr.whimprflow", "openai_api_key")
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .filter(|k| !k.trim().is_empty());
+    // See `whimpr_core::credentials` — a local file, not the OS keychain.
+    let key = whimpr_core::CredentialStore::load(&credentials_path()).get("openai_api_key");
     if let Some(slot) = OPENAI.get() {
         *slot.lock().unwrap() = key.map(|k| {
             whimpr_cleanup::OpenAiProvider::with_base_url(k, model, Some(base_url))
@@ -451,6 +503,25 @@ pub fn stats_summary(tz_offset_minutes: i32) -> StatsSummary {
 
 pub fn history(limit: usize) -> Vec<whimpr_core::HistoryItem> {
     STATS.get().map(|m| m.lock().unwrap().history(limit)).unwrap_or_default()
+}
+
+pub fn style_summary(mode: whimpr_core::StyleMode) -> whimpr_core::StyleSummary {
+    STYLE
+        .get()
+        .map(|m| m.lock().unwrap().summary(mode))
+        .unwrap_or_else(|| whimpr_core::StyleStore::default().summary(mode))
+}
+
+pub fn style_summaries() -> std::collections::HashMap<whimpr_core::StyleMode, whimpr_core::StyleSummary> {
+    whimpr_core::StyleMode::ALL.into_iter().map(|mode| (mode, style_summary(mode))).collect()
+}
+
+pub fn reset_style(mode: whimpr_core::StyleMode) {
+    if let Some(m) = STYLE.get() {
+        let mut store = m.lock().unwrap();
+        store.reset(mode);
+        let _ = store.save(&style_path());
+    }
 }
 
 pub fn dictionary_entries() -> Vec<crate::hotkey::DictEntryDto> {

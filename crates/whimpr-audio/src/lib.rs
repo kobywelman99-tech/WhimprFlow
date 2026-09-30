@@ -17,6 +17,19 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+/// A poisoned `Mutex` still holds valid data — recovering it means a panic in
+/// the cpal audio callback (or the capture thread) degrades that one
+/// operation instead of permanently poisoning the shared sample buffer for
+/// the rest of the process.
+trait PoisonRecover<T> {
+    fn lock_recover(&self) -> std::sync::MutexGuard<'_, T>;
+}
+impl<T> PoisonRecover<T> for Mutex<T> {
+    fn lock_recover(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 /// Number of bars in the rolling waveform window (matches the pill's bar count).
 const WAVE_BARS: usize = 6;
 /// Emit the waveform at ~30 fps.
@@ -45,6 +58,12 @@ impl CaptureResult {
 pub struct CaptureHandle {
     stop_tx: Sender<()>,
     join: Option<JoinHandle<Option<CaptureResult>>>,
+    /// Live mono sample buffer, shared with the capture thread — lets callers
+    /// peek at the audio recorded so far (for live partial transcripts)
+    /// without stopping capture. `sample_rate` is fixed for the life of the
+    /// handle (device config doesn't change mid-capture).
+    buffer: Arc<Mutex<Vec<f32>>>,
+    sample_rate: u32,
 }
 
 impl CaptureHandle {
@@ -52,6 +71,13 @@ impl CaptureHandle {
     pub fn stop(mut self) -> Option<CaptureResult> {
         let _ = self.stop_tx.send(());
         self.join.take().and_then(|h| h.join().ok().flatten())
+    }
+
+    /// A non-consuming copy of the audio captured so far, for a live partial
+    /// transcript while recording continues. Cheap relative to a Whisper
+    /// decode, but still an O(n) clone — callers should throttle.
+    pub fn snapshot(&self) -> (Vec<f32>, u32) {
+        (self.buffer.lock_recover().clone(), self.sample_rate)
     }
 }
 
@@ -75,7 +101,9 @@ where
     F: Fn(&[f32]) + Send + 'static,
 {
     let (stop_tx, stop_rx) = channel::<()>();
-    let (ready_tx, ready_rx) = channel::<anyhow::Result<()>>();
+    let (ready_tx, ready_rx) = channel::<anyhow::Result<u32>>();
+    let buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let buffer_for_handle = buffer.clone();
 
     let join = std::thread::spawn(move || -> Option<CaptureResult> {
         let host = cpal::default_host();
@@ -99,7 +127,6 @@ where
         let channels = supported.channels().max(1) as usize;
         let config = supported.config();
 
-        let buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
         let buf_cb = buffer.clone();
 
         let mut ring: VecDeque<f32> = VecDeque::from(vec![0.0f32; WAVE_BARS]);
@@ -115,7 +142,7 @@ where
                     let frames = data.len() / channels;
                     let mut sumsq = 0.0f32;
                     {
-                        let mut buf = buf_cb.lock().unwrap();
+                        let mut buf = buf_cb.lock_recover();
                         buf.reserve(frames);
                         for f in 0..frames {
                             let mut acc = 0.0f32;
@@ -161,13 +188,13 @@ where
             let _ = ready_tx.send(Err(anyhow::anyhow!("failed to start stream: {e}")));
             return None;
         }
-        let _ = ready_tx.send(Ok(()));
+        let _ = ready_tx.send(Ok(sample_rate));
 
         // Keep the stream alive on this thread until asked to stop.
         let _ = stop_rx.recv();
         drop(stream);
 
-        let samples = std::mem::take(&mut *buffer.lock().unwrap());
+        let samples = std::mem::take(&mut *buffer.lock_recover());
         Some(CaptureResult {
             samples,
             sample_rate,
@@ -175,9 +202,11 @@ where
     });
 
     match ready_rx.recv() {
-        Ok(Ok(())) => Ok(CaptureHandle {
+        Ok(Ok(sample_rate)) => Ok(CaptureHandle {
             stop_tx,
             join: Some(join),
+            buffer: buffer_for_handle,
+            sample_rate,
         }),
         Ok(Err(e)) => Err(e),
         Err(_) => Err(anyhow::anyhow!("capture thread exited before starting")),

@@ -31,13 +31,19 @@ struct BarStatePayload {
     state: &'static str,
 }
 
-/// Anchor the overlay window bottom-center of its monitor.
+/// Anchor the overlay window bottom-center of its monitor — preferring
+/// whichever monitor currently has the mouse cursor, so a multi-monitor setup
+/// puts the pill on the screen the user is actually working on rather than
+/// wherever it happened to launch. Falls back through primary/current/first
+/// available if the cursor position can't be read (e.g. before the window
+/// has mapped).
 fn position_overlay(w: &WebviewWindow) {
-    // current_monitor() can be None before the window maps; fall back sensibly.
-    let monitor = w
-        .primary_monitor()
+    let cursor_monitor = w
+        .cursor_position()
         .ok()
-        .flatten()
+        .and_then(|p| w.monitor_from_point(p.x, p.y).ok().flatten());
+    let monitor = cursor_monitor
+        .or_else(|| w.primary_monitor().ok().flatten())
         .or_else(|| w.current_monitor().ok().flatten())
         .or_else(|| w.available_monitors().ok().and_then(|m| m.into_iter().next()));
     let Some(monitor) = monitor else {
@@ -74,12 +80,79 @@ fn build_overlay(app: &tauri::App) -> tauri::Result<WebviewWindow> {
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
+    // Not user-resizable (no drag handles) — the frontend still grows/shrinks
+    // it programmatically via `resize_overlay` as the pill's content changes.
     .resizable(false)
     .visible(true)
     .build()?;
-    position_overlay(&overlay);
+    // A normal window is confined to whichever Space it was created on; this
+    // pins it to the "all Spaces" collection so it stays visible when the
+    // user swipes to a different desktop/Space, like a HUD.
+    let _ = overlay.set_visible_on_all_workspaces(true);
+    // Once the user has dragged the pill somewhere, honor that instead of
+    // resetting to the default bottom-center spot on every launch.
+    match hotkey::current_settings().overlay_pos {
+        Some((x, y)) => {
+            let _ = overlay.set_position(tauri::PhysicalPosition { x, y });
+        }
+        None => position_overlay(&overlay),
+    }
     let _ = overlay.show();
     Ok(overlay)
+}
+
+/// Move the overlay to the monitor under the cursor, bottom-centered — called
+/// when a new dictation session starts so the pill is always on the screen
+/// the user is actually working on, not wherever it happened to launch. A
+/// no-op once the user has dragged the pill to a custom spot (same rule
+/// `resize_overlay` already follows): a manual placement should stick, not
+/// get silently overridden the next time they start dictating.
+pub fn reposition_to_active_screen(app: &tauri::AppHandle) {
+    if hotkey::current_settings().overlay_pos.is_some() {
+        return;
+    }
+    if let Some(w) = app.get_webview_window(OVERLAY_LABEL) {
+        position_overlay(&w);
+    }
+}
+
+/// Resize the overlay to fit its current content (the pill grows as the live
+/// transcript grows). If the user hasn't dragged it, keep the default
+/// behavior of re-anchoring bottom-center so it doesn't drift as its height
+/// changes. Once they've dragged it to a custom spot, leave that top-left
+/// corner alone on resize instead — otherwise every content-size change
+/// would silently undo the move. Called from the frontend whenever its
+/// measured content size changes.
+#[tauri::command]
+fn resize_overlay(app: tauri::AppHandle, width: f64, height: f64) {
+    if let Some(w) = app.get_webview_window(OVERLAY_LABEL) {
+        let _ = w.set_size(tauri::LogicalSize::new(width, height));
+        if hotkey::current_settings().overlay_pos.is_none() {
+            position_overlay(&w);
+        }
+    }
+}
+
+/// Persist the overlay's position after the user drags it (see the
+/// `data-tauri-drag-region` pill in the frontend, which calls this once the
+/// drag ends). From then on the pill stays where they put it instead of
+/// snapping back to the bottom on resize or relaunch.
+#[tauri::command]
+fn save_overlay_position(x: i32, y: i32) {
+    let mut settings = hotkey::current_settings();
+    settings.overlay_pos = Some((x, y));
+    hotkey::update_settings(settings);
+}
+
+/// Undo a drag and go back to the default bottom-center anchor.
+#[tauri::command]
+fn reset_overlay_position(app: tauri::AppHandle) {
+    let mut settings = hotkey::current_settings();
+    settings.overlay_pos = None;
+    hotkey::update_settings(settings);
+    if let Some(w) = app.get_webview_window(OVERLAY_LABEL) {
+        position_overlay(&w);
+    }
 }
 
 fn build_hub(app: &tauri::App) -> tauri::Result<WebviewWindow> {
@@ -136,6 +209,19 @@ fn remove_dictionary_entry(correct: String) {
     hotkey::dictionary_remove(&correct);
 }
 
+/// The learned style profiles (Email/General/Essay-Report) for the Hub's
+/// Style page, keyed by mode.
+#[tauri::command]
+fn get_style_summaries() -> std::collections::HashMap<whimpr_core::StyleMode, whimpr_core::StyleSummary> {
+    hotkey::style_summaries()
+}
+
+/// Wipe one mode's learned style profile.
+#[tauri::command]
+fn reset_style_profile(mode: whimpr_core::StyleMode) {
+    hotkey::reset_style(mode);
+}
+
 /// Permission + capability status shown in the Hub.
 ///
 /// The permission half is a live read every time (see `permissions::snapshot`);
@@ -178,12 +264,25 @@ fn get_last_error() -> Option<diag::ErrorDto> {
     diag::last_error()
 }
 
+/// Where cloud cleanup API keys live — see `whimpr_core::credentials` for why
+/// this is a restricted-permission local file rather than the OS keychain.
+fn credentials_path() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var("APPDATA").unwrap_or_default();
+        std::path::PathBuf::from(base).join("WhimprFlow").join("credentials.json")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::PathBuf::from(home)
+            .join("Library/Application Support/WhimprFlow")
+            .join("credentials.json")
+    }
+}
+
 fn has_key(account: &str) -> bool {
-    keyring::Entry::new("com.whimpr.whimprflow", account)
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .map(|k| !k.trim().is_empty())
-        .unwrap_or(false)
+    whimpr_core::CredentialStore::load(&credentials_path()).get(account).is_some()
 }
 
 #[cfg(target_os = "macos")]
@@ -229,8 +328,23 @@ fn request_input_monitoring() {
     }
 }
 
-/// Save (or clear, when empty) an API key in the OS keychain, then rebuild providers
-/// so it takes effect immediately.
+/// Cancel the in-progress dictation (the pill's ✕ button) — discards the
+/// audio, no paste, same as pressing Esc.
+#[tauri::command]
+fn cancel_dictation() {
+    hotkey::cancel_dictation();
+}
+
+/// End the in-progress dictation (the pill's stop button) as if the trigger
+/// key had been released — transcribes, cleans up, and pastes as usual.
+#[tauri::command]
+fn stop_dictation() {
+    hotkey::stop_dictation();
+}
+
+/// Save (or clear, when empty) an API key in the local credentials file, then
+/// rebuild providers so it takes effect immediately. See
+/// `whimpr_core::credentials` for why this isn't the OS keychain.
 #[tauri::command]
 fn set_api_key(provider: String, key: String) -> Result<(), String> {
     let account = match provider.as_str() {
@@ -238,14 +352,16 @@ fn set_api_key(provider: String, key: String) -> Result<(), String> {
         "anthropic" => "anthropic_api_key",
         _ => return Err(format!("unknown provider {provider}")),
     };
-    let entry =
-        keyring::Entry::new("com.whimpr.whimprflow", account).map_err(|e| e.to_string())?;
-    let key = key.trim();
-    // Delete any existing item first so the new one is created by (and readable to)
-    // this app — a key added via the `security` CLI isn't readable by the app.
-    let _ = entry.delete_credential();
-    if !key.is_empty() {
-        entry.set_password(key).map_err(|e| e.to_string())?;
+    let path = credentials_path();
+    let mut store = whimpr_core::CredentialStore::load(&path);
+    store.set(account, &key);
+    store.save(&path).map_err(|e| e.to_string())?;
+    // Read it straight back to catch a write/read mismatch immediately
+    // rather than only discovering it later via a silently-false
+    // `has_anthropic_key`/`has_openai_key` status.
+    let readback = whimpr_core::CredentialStore::load(&path).get(account);
+    if !key.trim().is_empty() && readback.is_none() {
+        return Err("key was saved but could not be read back".to_string());
     }
     hotkey::rebuild_providers();
     Ok(())
@@ -261,12 +377,19 @@ pub fn run() {
             get_dictionary,
             add_dictionary_entry,
             remove_dictionary_entry,
+            get_style_summaries,
+            reset_style_profile,
             get_status,
             get_last_error,
             request_microphone,
             request_accessibility,
             request_input_monitoring,
-            set_api_key
+            set_api_key,
+            cancel_dictation,
+            stop_dictation,
+            resize_overlay,
+            save_overlay_position,
+            reset_overlay_position
         ])
         .setup(|app| {
             // Regular app: shows in the Dock with a normal, focusable main window.

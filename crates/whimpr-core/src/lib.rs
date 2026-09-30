@@ -11,18 +11,22 @@
 
 pub mod asr;
 pub mod cleanup;
+pub mod credentials;
 pub mod diagnostics;
 pub mod dictionary;
 pub mod settings;
 pub mod state;
 pub mod stats;
+pub mod style;
 pub mod types;
 
 pub use asr::{AsrEngine, AsrEngineId, Transcript};
-pub use cleanup::{CleanupContext, CleanupLevel, CleanupProvider, ProviderId, VocabEntry};
+pub use cleanup::{CleanupContext, CleanupLevel, CleanupProvider, FormatMode, ProviderId, VocabEntry};
+pub use credentials::CredentialStore;
 pub use diagnostics::{Diagnostic, InjectionFailure, Platform};
 pub use dictionary::{DictSource, DictionaryEntry, DictionaryStore};
 pub use settings::{CleanupMode, Settings};
 pub use stats::{HistoryItem, SessionRecord, StatsStore, StatsSummary};
 pub use state::{Action, BarState, DictationState, Input, PipelineEvent, StateMachine, TriggerToken};
+pub use style::{resolve_style_mode, StyleMode, StyleStore, StyleSummary};
 pub use types::{RecordMode, SessionId};

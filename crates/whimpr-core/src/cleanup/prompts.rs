@@ -129,20 +129,44 @@ meaning, facts, names, numbers, dates, quotes, code, and URLs. Answer in strict 
 only: {\"verdict\":\"PASS\"|\"FAIL\",\"reason\":\"<short>\",\"corrected\":\"<minimal fix if \
 FAIL, else empty>\"}.";
 
+/// The EMAIL "Formatting Mode" text, shared between auto-detection (an email
+/// app is focused) and a manual `FormatMode::Email` override, so both paths
+/// send byte-identical instructions.
+const EMAIL_MODE_TEXT: &str = "\
+Target is EMAIL. Present the dictation as a well-structured email: complete \
+sentences, paragraph breaks between distinct ideas, and standard capitalization and \
+punctuation. Include a greeting or sign-off ONLY if the speaker actually dictated one.";
+
+/// The ESSAY/REPORT "Formatting Mode" text, sent only for a manual
+/// `FormatMode::EssayReport` override — no app reliably signals this on its
+/// own, so it is never auto-detected.
+const ESSAY_REPORT_MODE_TEXT: &str = "\
+Target is an ESSAY or REPORT. Use a formal, structured register: full sentences, clear \
+topic sentences, and logical paragraph breaks between ideas. Avoid contractions and \
+casual filler phrasing unless the speaker actually used them. Only add headings if the \
+speaker explicitly dictated them.";
+
+/// Whether `bundle_id` is a known email client. Shared by [`format_mode_for_app`]
+/// (the auto-detected case) and [`crate::style::resolve_style_mode`] (so the
+/// same apps that get email-shaped cleanup also learn into the email style
+/// bucket). Substring-matched and case-insensitive so app variants and
+/// browsers-of-the-same-family still hit.
+pub fn is_email_app(bundle_id: &str) -> bool {
+    let b = bundle_id.to_ascii_lowercase();
+    b.contains("mail") || b.contains("outlook") || b.contains("spark") || b.contains("airmail")
+}
+
 /// A per-app "Formatting Mode": how to shape the output for the medium the user
 /// is pasting into, matched on the frontmost app's bundle id. `None` means no
 /// adaptation (default cleanup only). Held as data so every provider (local,
 /// OpenAI, Anthropic) shares the same behavior. Substring-matched and
 /// case-insensitive so app variants and browsers-of-the-same-family still hit.
+/// Only consulted when the user's [`super::FormatMode`] is `Auto` — a manual
+/// selection always overrides this guess (see [`system_for`]).
 pub fn format_mode_for_app(bundle_id: &str) -> Option<&'static str> {
     let b = bundle_id.to_ascii_lowercase();
-    // Email clients.
-    if b.contains("mail") || b.contains("outlook") || b.contains("spark") || b.contains("airmail") {
-        Some(
-            "Target is EMAIL. Present the dictation as a well-structured email: complete \
-             sentences, paragraph breaks between distinct ideas, and standard capitalization and \
-             punctuation. Include a greeting or sign-off ONLY if the speaker actually dictated one.",
-        )
+    if is_email_app(bundle_id) {
+        Some(EMAIL_MODE_TEXT)
     // SMS / DM style: casual and short.
     } else if b.contains("mobilesms")   // Apple Messages
         || b.contains("imessage")
@@ -180,15 +204,27 @@ pub fn format_mode_for_app(bundle_id: &str) -> Option<&'static str> {
 }
 
 /// Assemble the final system prompt: the shared prompt, the level modifier, and
-/// (when the paste target is known) the per-app Formatting Mode.
-pub fn system_for(level: super::levels::CleanupLevel, app_bundle_id: Option<&str>) -> String {
+/// the Formatting Mode text — auto-detected from the focused app when
+/// `format_mode` is `Auto`, or the matching manual override's text otherwise
+/// (which always wins over the app guess).
+pub fn system_for(
+    level: super::levels::CleanupLevel,
+    app_bundle_id: Option<&str>,
+    format_mode: super::FormatMode,
+) -> String {
     let mut s = SYSTEM_PROMPT.to_string();
     let modifier = level.modifier();
     if !modifier.is_empty() {
         s.push_str("\n\n");
         s.push_str(modifier);
     }
-    if let Some(mode) = app_bundle_id.and_then(format_mode_for_app) {
+    let mode_text = match format_mode {
+        super::FormatMode::Auto => app_bundle_id.and_then(format_mode_for_app),
+        super::FormatMode::Email => Some(EMAIL_MODE_TEXT),
+        super::FormatMode::General => None,
+        super::FormatMode::EssayReport => Some(ESSAY_REPORT_MODE_TEXT),
+    };
+    if let Some(mode) = mode_text {
         s.push_str("\n\n# Formatting Mode (follow this for structure and tone)\n");
         s.push_str(mode);
     }
@@ -197,5 +233,5 @@ pub fn system_for(level: super::levels::CleanupLevel, app_bundle_id: Option<&str
 
 /// Assemble the final system prompt for a level with no app adaptation.
 pub fn system_for_level(level: super::levels::CleanupLevel) -> String {
-    system_for(level, None)
+    system_for(level, None, super::FormatMode::Auto)
 }

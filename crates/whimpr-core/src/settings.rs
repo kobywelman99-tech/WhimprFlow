@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::cleanup::CleanupLevel;
+use crate::cleanup::{CleanupLevel, FormatMode};
 
 /// Which cleanup engine processes transcripts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -36,6 +36,27 @@ pub struct Settings {
     pub anthropic_model: String,
     /// Play the record-start ping.
     pub sound_on_start: bool,
+    /// User-dragged overlay position (physical screen pixels, top-left), or
+    /// `None` for the default bottom-center anchor. Set once the user drags
+    /// the pill; from then on it stays put instead of snapping back to the
+    /// bottom on every resize/restart.
+    #[serde(default)]
+    pub overlay_pos: Option<(i32, i32)>,
+    /// Passively learn the user's writing/speaking voice from raw transcripts
+    /// and fold a short summary into the (already-happening) cleanup request
+    /// — see `crate::style`. On by default: it's zero extra API calls, only
+    /// a small addition to the prompt of the cleanup call that already runs.
+    #[serde(default = "default_true")]
+    pub style_learning_enabled: bool,
+    /// How to shape cleanup output for the target medium — `Auto` infers it
+    /// from the focused app; a manual value (Email/General/Essay-Report)
+    /// overrides that guess. See `crate::cleanup::FormatMode`.
+    #[serde(default)]
+    pub format_mode: FormatMode,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -47,6 +68,9 @@ impl Default for Settings {
             openai_base_url: String::new(),
             anthropic_model: "claude-haiku-4-5".to_string(),
             sound_on_start: true,
+            overlay_pos: None,
+            style_learning_enabled: true,
+            format_mode: FormatMode::default(),
         }
     }
 }

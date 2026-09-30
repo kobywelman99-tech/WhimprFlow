@@ -40,6 +40,22 @@ mod imp {
 
     const OVERLAY_LABEL: &str = "whimpr_bar";
 
+    /// A poisoned `Mutex` still holds valid data — the panic that poisoned it
+    /// happened *after* some earlier mutation, not during this one, so the
+    /// data itself isn't corrupt. Recovering it here means one panic on a
+    /// background thread (capture callback, ASR decode, a cleanup HTTP call)
+    /// degrades that one operation instead of permanently poisoning every
+    /// future `.lock()` on the same static and bricking dictation until the
+    /// app is relaunched.
+    trait PoisonRecover<T> {
+        fn lock_recover(&self) -> std::sync::MutexGuard<'_, T>;
+    }
+    impl<T> PoisonRecover<T> for Mutex<T> {
+        fn lock_recover(&self) -> std::sync::MutexGuard<'_, T> {
+            self.lock().unwrap_or_else(|e| e.into_inner())
+        }
+    }
+
     // --- CoreGraphics / CoreFoundation FFI (listen-only Fn tap) -----------
     type CFMachPortRef = *mut c_void;
     type CFRunLoopSourceRef = *mut c_void;
@@ -111,6 +127,7 @@ mod imp {
     static SETTINGS: OnceLock<Mutex<whimpr_core::Settings>> = OnceLock::new();
     static DICTIONARY: OnceLock<Mutex<whimpr_core::DictionaryStore>> = OnceLock::new();
     static STATS: OnceLock<Mutex<whimpr_core::StatsStore>> = OnceLock::new();
+    static STYLE: OnceLock<Mutex<whimpr_core::StyleStore>> = OnceLock::new();
 
     #[derive(Clone, Serialize)]
     struct BarPayload {
@@ -126,6 +143,17 @@ mod imp {
     struct TranscriptPayload {
         text: String,
     }
+
+    /// Guards against a partial-transcribe tick overlapping a still-running one
+    /// (Whisper re-decodes the whole buffer so far each tick; on a long
+    /// utterance a decode can take longer than the tick interval).
+    static PARTIAL_BUSY: AtomicBool = AtomicBool::new(false);
+    /// How often to re-decode the in-progress recording for the live partial
+    /// transcript shown in the pill.
+    const PARTIAL_TICK: Duration = Duration::from_millis(900);
+    /// Below this much audio, skip the decode — not enough signal yet to be
+    /// worth a full Whisper pass.
+    const PARTIAL_MIN_SECS: f32 = 0.6;
 
     /// The whisper ASR model to load: prefer the most accurate one present, in
     /// descending quality order, falling back to the small base model. Bigger
@@ -160,6 +188,12 @@ mod imp {
     fn stats_path() -> PathBuf {
         support_dir().join("stats.json")
     }
+    fn style_path() -> PathBuf {
+        support_dir().join("style.json")
+    }
+    pub(crate) fn credentials_path() -> PathBuf {
+        support_dir().join("credentials.json")
+    }
 
     /// Seconds since the Unix epoch (UTC), or 0 if the clock is before the epoch.
     fn unix_now() -> u64 {
@@ -176,9 +210,9 @@ mod imp {
         if words == 0 {
             return;
         }
-        let app = TARGET_APP.get().and_then(|m| m.lock().unwrap().clone());
+        let app = TARGET_APP.get().and_then(|m| m.lock_recover().clone());
         if let Some(m) = STATS.get() {
-            let mut store = m.lock().unwrap();
+            let mut store = m.lock_recover();
             let duration_ms = (duration_secs.max(0.0) * 1000.0) as u32;
             let chars = text.chars().count() as u32;
             store.record(words, duration_ms, chars, unix_now(), text.to_string(), app);
@@ -190,7 +224,7 @@ mod imp {
     pub fn history(limit: usize) -> Vec<whimpr_core::HistoryItem> {
         STATS
             .get()
-            .map(|m| m.lock().unwrap().history(limit))
+            .map(|m| m.lock_recover().history(limit))
             .unwrap_or_default()
     }
 
@@ -199,8 +233,7 @@ mod imp {
         DICTIONARY
             .get()
             .map(|m| {
-                m.lock()
-                    .unwrap()
+                m.lock_recover()
                     .entries
                     .iter()
                     .map(|e| DictEntryDto {
@@ -216,7 +249,7 @@ mod imp {
     /// Add a manual dictionary entry and persist.
     pub fn dictionary_add(correct: String, mishears: Vec<String>) {
         if let Some(m) = DICTIONARY.get() {
-            let mut store = m.lock().unwrap();
+            let mut store = m.lock_recover();
             store.add(correct, mishears, whimpr_core::DictSource::Manual);
             let _ = store.save(&dict_path());
         }
@@ -225,7 +258,7 @@ mod imp {
     /// Remove a dictionary entry by spelling and persist.
     pub fn dictionary_remove(correct: &str) {
         if let Some(m) = DICTIONARY.get() {
-            let mut store = m.lock().unwrap();
+            let mut store = m.lock_recover();
             if store.remove(correct) {
                 let _ = store.save(&dict_path());
             }
@@ -236,9 +269,31 @@ mod imp {
     /// Marked ✨ auto in the UI. No-op if it would duplicate an existing entry's data.
     pub fn dictionary_learn(correct: String, mishears: Vec<String>) {
         if let Some(m) = DICTIONARY.get() {
-            let mut store = m.lock().unwrap();
+            let mut store = m.lock_recover();
             store.add(correct, mishears, whimpr_core::DictSource::Auto);
             let _ = store.save(&dict_path());
+        }
+    }
+
+    /// The learned style profile for one mode, for the Hub's Style page.
+    pub fn style_summary(mode: whimpr_core::StyleMode) -> whimpr_core::StyleSummary {
+        STYLE
+            .get()
+            .map(|m| m.lock_recover().summary(mode))
+            .unwrap_or_else(|| whimpr_core::StyleStore::default().summary(mode))
+    }
+
+    /// All three modes' summaries in one call, for the Hub's Style page.
+    pub fn style_summaries() -> std::collections::HashMap<whimpr_core::StyleMode, whimpr_core::StyleSummary> {
+        whimpr_core::StyleMode::ALL.into_iter().map(|mode| (mode, style_summary(mode))).collect()
+    }
+
+    /// Wipe one mode's learned style profile (the Style page's "Reset" button).
+    pub fn reset_style(mode: whimpr_core::StyleMode) {
+        if let Some(m) = STYLE.get() {
+            let mut store = m.lock_recover();
+            store.reset(mode);
+            let _ = store.save(&style_path());
         }
     }
 
@@ -247,13 +302,14 @@ mod imp {
     pub fn stats_summary(tz_offset_minutes: i32) -> whimpr_core::StatsSummary {
         STATS
             .get()
-            .map(|m| m.lock().unwrap().summary(tz_offset_minutes, unix_now()))
+            .map(|m| m.lock_recover().summary(tz_offset_minutes, unix_now()))
             .unwrap_or_else(|| {
                 whimpr_core::StatsStore::default().summary(tz_offset_minutes, unix_now())
             })
     }
 
-    /// Read an API key from an env var or the OS keychain (never a plaintext file).
+    /// Read an API key from an env var or the local credentials file (see
+    /// `whimpr_core::credentials` for why this isn't the OS keychain).
     fn read_key(account: &str, env_var: &str) -> Option<String> {
         if let Ok(k) = std::env::var(env_var) {
             let k = k.trim().to_string();
@@ -261,11 +317,7 @@ mod imp {
                 return Some(k);
             }
         }
-        keyring::Entry::new("com.whimpr.whimprflow", account)
-            .ok()
-            .and_then(|e| e.get_password().ok())
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
+        whimpr_core::CredentialStore::load(&credentials_path()).get(account)
     }
     fn read_openai_key() -> Option<String> {
         read_key("openai_api_key", "OPENAI_API_KEY")
@@ -278,13 +330,13 @@ mod imp {
     pub fn current_settings() -> whimpr_core::Settings {
         SETTINGS
             .get()
-            .map(|m| m.lock().unwrap().clone())
+            .map(|m| m.lock_recover().clone())
             .unwrap_or_default()
     }
     /// Apply new settings and rebuild the cloud providers (picks up model changes).
     pub fn update_settings(new: whimpr_core::Settings) {
         if let Some(m) = SETTINGS.get() {
-            *m.lock().unwrap() = new.clone();
+            *m.lock_recover() = new.clone();
         }
         let _ = new.save(&settings_path());
         rebuild_providers();
@@ -309,13 +361,13 @@ mod imp {
             anthropic.is_some()
         );
         match OPENAI.get() {
-            Some(m) => *m.lock().unwrap() = openai,
+            Some(m) => *m.lock_recover() = openai,
             None => {
                 let _ = OPENAI.set(Mutex::new(openai));
             }
         }
         match ANTHROPIC.get() {
-            Some(m) => *m.lock().unwrap() = anthropic,
+            Some(m) => *m.lock_recover() = anthropic,
             None => {
                 let _ = ANTHROPIC.set(Mutex::new(anthropic));
             }
@@ -325,7 +377,7 @@ mod imp {
     /// Clean a raw transcript per the current settings (mode + level), feeding in the
     /// dictionary vocabulary relevant to this utterance. Falls back to raw whenever
     /// cleanup is off, the provider is unavailable, it errors, or the gates reject it.
-    fn clean_transcript(raw: &str) -> String {
+    fn clean_transcript(app: &AppHandle, raw: &str) -> String {
         let settings = current_settings();
         let level = settings.cleanup_level;
         if matches!(settings.cleanup_mode, CleanupMode::Raw) || level.bypasses_llm() {
@@ -341,22 +393,30 @@ mod imp {
         let raw_out = whimpr_core::cleanup::post_process(&raw_norm);
         let vocab = DICTIONARY
             .get()
-            .map(|d| d.lock().unwrap().prefilter(raw, 15))
+            .map(|d| d.lock_recover().prefilter(raw, 15))
             .unwrap_or_default();
-        let app_bundle_id = TARGET_APP.get().and_then(|m| m.lock().unwrap().clone());
+        let app_bundle_id = TARGET_APP.get().and_then(|m| m.lock_recover().clone());
         if let Some(app) = app_bundle_id.as_deref() {
             eprintln!("[whimpr] cleanup target app: {app}");
         }
+        let style_mode = whimpr_core::resolve_style_mode(settings.format_mode, app_bundle_id.as_deref());
+        let style_summary = if settings.style_learning_enabled {
+            STYLE.get().and_then(|m| m.lock_recover().summary_for_prompt(style_mode))
+        } else {
+            None
+        };
         let ctx = CleanupContext {
             level,
             vocab,
             app_bundle_id,
+            style_summary,
+            format_mode: settings.format_mode,
             ..Default::default()
         };
         // Run the on-device model with the same prompt + per-app formatting.
         let run_local = || -> Option<anyhow::Result<String>> {
             LOCAL.get().and_then(|m| {
-                m.lock().unwrap().as_mut().map(|w| {
+                m.lock_recover().as_mut().map(|w| {
                     // System prompt + few-shot demonstration turns + the transcript,
                     // so the on-device model actually produces newlines/lists and
                     // resolves self-corrections instead of just being told to.
@@ -370,11 +430,11 @@ mod imp {
         let result: Option<anyhow::Result<String>> = match settings.cleanup_mode {
             CleanupMode::OpenAi => OPENAI
                 .get()
-                .and_then(|m| m.lock().unwrap().as_ref().map(|p| p.cleanup(raw, &ctx)))
+                .and_then(|m| m.lock_recover().as_ref().map(|p| p.cleanup(raw, &ctx)))
                 .or_else(run_local),
             CleanupMode::Anthropic => ANTHROPIC
                 .get()
-                .and_then(|m| m.lock().unwrap().as_ref().map(|p| p.cleanup(raw, &ctx)))
+                .and_then(|m| m.lock_recover().as_ref().map(|p| p.cleanup(raw, &ctx)))
                 .or_else(run_local),
             CleanupMode::Local => run_local(),
             CleanupMode::Raw => None,
@@ -398,13 +458,104 @@ mod imp {
             }
             None => {
                 if matches!(settings.cleanup_mode, CleanupMode::Local) {
-                    eprintln!("[whimpr] local cleanup model not wired yet — pasting raw");
+                    crate::diag::notice(
+                        app,
+                        "Cleanup skipped — pasted raw",
+                        "The on-device cleanup model isn't ready yet, so this dictation was \
+                         pasted exactly as spoken, with no cleanup applied. It should be ready \
+                         shortly; if this keeps happening, try switching Cleanup Mode to \
+                         OpenAI or Anthropic in Settings.",
+                    );
                 } else {
-                    eprintln!("[whimpr] cleanup provider has no API key — pasting raw");
+                    crate::diag::notice(
+                        app,
+                        "Cleanup skipped — pasted raw",
+                        "No API key is set for the selected cleanup provider, so this \
+                         dictation was pasted exactly as spoken. Add a key under Settings → \
+                         Cleanup Engine to enable cleanup.",
+                    );
                 }
                 raw_out
             }
         }
+    }
+
+    /// While recording, periodically re-decode the audio captured so far with
+    /// Whisper (local, no network/API cost) and emit it as a partial transcript
+    /// so the pill can show a live "what you're saying" preview. Runs entirely
+    /// off-thread; stops itself once `CAPTURE` is empty (stopped or discarded).
+    /// The final cleaned transcript still comes from the one-shot pipeline in
+    /// `StopCaptureAndFinalize` — this never touches the cloud cleanup LLM.
+    fn spawn_partial_transcribe_loop(app: AppHandle) {
+        std::thread::spawn(move || loop {
+            std::thread::sleep(PARTIAL_TICK);
+            let still_recording = CAPTURE
+                .get()
+                .map(|slot| slot.lock_recover().is_some())
+                .unwrap_or(false);
+            if !still_recording {
+                // Clear any partial text left in the pill now that the final
+                // (cleaned) transcript is about to take over.
+                let _ = app.emit_to(
+                    OVERLAY_LABEL,
+                    "whimpr://transcript/partial",
+                    TranscriptPayload { text: String::new() },
+                );
+                return;
+            }
+            if PARTIAL_BUSY.swap(true, Ordering::SeqCst) {
+                continue; // previous decode still running; skip this tick
+            }
+            let Some(asr) = ASR.get().cloned() else {
+                PARTIAL_BUSY.store(false, Ordering::SeqCst);
+                continue;
+            };
+            let snapshot = CAPTURE
+                .get()
+                .and_then(|slot| slot.lock_recover().as_ref().map(|h| h.snapshot()));
+            let Some((samples, sample_rate)) = snapshot else {
+                PARTIAL_BUSY.store(false, Ordering::SeqCst);
+                continue;
+            };
+            let duration_secs = if sample_rate == 0 {
+                0.0
+            } else {
+                samples.len() as f32 / sample_rate as f32
+            };
+            if duration_secs < PARTIAL_MIN_SECS {
+                PARTIAL_BUSY.store(false, Ordering::SeqCst);
+                continue;
+            }
+            let app2 = app.clone();
+            std::thread::spawn(move || {
+                let pcm = whimpr_audio::resample_to_16k(&samples, sample_rate);
+                if let Ok(t) = asr.transcribe(&pcm) {
+                    let _ = app2.emit_to(
+                        OVERLAY_LABEL,
+                        "whimpr://transcript/partial",
+                        TranscriptPayload { text: t.text },
+                    );
+                }
+                PARTIAL_BUSY.store(false, Ordering::SeqCst);
+            });
+        });
+    }
+
+    /// Cancel the in-progress dictation (discard the audio, no paste) — the
+    /// pill's ✕ button does this, equivalent to pressing Esc.
+    pub fn cancel_dictation() {
+        handle_input(Input::Trigger(TriggerToken::Cancel { at_ms: now_ms() }));
+    }
+
+    /// End the in-progress dictation as if the trigger key had been
+    /// released — the pill's stop button does this, so a click finishes and
+    /// pastes the same way releasing Fn would, without needing to keep the
+    /// physical key held.
+    pub fn stop_dictation() {
+        handle_input(Input::Trigger(TriggerToken::Up {
+            binding: BindingId::PushToTalk,
+            at_ms: now_ms(),
+        }));
     }
 
     fn now_ms() -> u64 {
@@ -434,7 +585,7 @@ mod imp {
             return;
         };
         let actions = {
-            let mut m = machine.lock().unwrap();
+            let mut m = machine.lock_recover();
             m.step(input)
         };
         for action in actions {
@@ -458,6 +609,10 @@ mod imp {
             // Start the microphone; stream real RMS bars to the pill waveform.
             // Runs off the tap thread so the mic-permission prompt can't stall keys.
             Action::StartCapture { .. } => {
+                // Jump to whichever monitor the cursor is on before anything
+                // else, so the pill shows up where the user is about to look
+                // rather than wherever it was left on a different screen.
+                crate::reposition_to_active_screen(app);
                 let app_thread = app.clone();
                 std::thread::spawn(move || {
                     let app_cb = app_thread.clone();
@@ -469,7 +624,8 @@ mod imp {
                         );
                     }) {
                         Ok(handle) => {
-                            *CAPTURE.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(handle);
+                            *CAPTURE.get_or_init(|| Mutex::new(None)).lock_recover() = Some(handle);
+                            spawn_partial_transcribe_loop(app_thread);
                         }
                         Err(e) => eprintln!("[whimpr] mic capture failed to start: {e}"),
                     }
@@ -478,7 +634,7 @@ mod imp {
             // Stop the mic, transcribe the buffered audio, and advance the machine.
             Action::StopCaptureAndFinalize { session } => {
                 let app2 = app.clone();
-                let handle = CAPTURE.get().and_then(|slot| slot.lock().unwrap().take());
+                let handle = CAPTURE.get().and_then(|slot| slot.lock_recover().take());
                 std::thread::spawn(move || {
                     // Whatever happens, return the pill to idle (done -> idle).
                     let finish =
@@ -529,8 +685,26 @@ mod imp {
                         Ok(t) => {
                             let raw = t.text;
                             eprintln!("[whimpr] TRANSCRIPT: \"{}\"", raw);
+                            // Passively learn the user's voice from the raw transcript —
+                            // pure local text counting, no LLM call, regardless of which
+                            // cleanup mode is selected (even Raw/off) since this is about
+                            // what they said, not how it gets cleaned up. Learned into the
+                            // same mode bucket this dictation's cleanup will use.
+                            let settings_now = current_settings();
+                            if settings_now.style_learning_enabled {
+                                if let Some(m) = STYLE.get() {
+                                    let app_bundle_id = TARGET_APP.get().and_then(|m| m.lock_recover().clone());
+                                    let style_mode = whimpr_core::resolve_style_mode(
+                                        settings_now.format_mode,
+                                        app_bundle_id.as_deref(),
+                                    );
+                                    let mut store = m.lock_recover();
+                                    store.observe(style_mode, &raw);
+                                    let _ = store.save(&style_path());
+                                }
+                            }
                             // Clean the transcript (cloud LLM if configured), then paste.
-                            let text = clean_transcript(&raw);
+                            let text = clean_transcript(&app2, &raw);
                             if text != raw {
                                 eprintln!("[whimpr] CLEANED:   \"{}\"", text);
                             }
@@ -576,7 +750,7 @@ mod imp {
             }
             Action::DiscardCapture { .. } => {
                 if let Some(slot) = CAPTURE.get() {
-                    if let Some(handle) = slot.lock().unwrap().take() {
+                    if let Some(handle) = slot.lock_recover().take() {
                         let _ = handle.stop();
                     }
                 }
@@ -613,7 +787,7 @@ mod imp {
                     eprintln!("[whimpr] Fn DOWN");
                     // Snapshot the paste target now, while the user's app is focused.
                     let target = crate::appctx::frontmost_bundle_id();
-                    *TARGET_APP.get_or_init(|| Mutex::new(None)).lock().unwrap() = target;
+                    *TARGET_APP.get_or_init(|| Mutex::new(None)).lock_recover() = target;
                     handle_input(Input::Trigger(TriggerToken::Down {
                         binding: BindingId::PushToTalk,
                         at_ms,
@@ -665,6 +839,7 @@ mod imp {
         let _ = SETTINGS.set(Mutex::new(settings));
         let _ = DICTIONARY.set(Mutex::new(dict));
         let _ = STATS.set(Mutex::new(whimpr_core::StatsStore::load(&stats_path())));
+        let _ = STYLE.set(Mutex::new(whimpr_core::StyleStore::load(&style_path())));
         rebuild_providers();
 
         // Start the local cleanup worker in the background (model load takes a few
@@ -766,15 +941,17 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 pub use imp::{
-    current_settings, dictionary_add, dictionary_entries, dictionary_learn, dictionary_remove,
-    history, install, rebuild_providers, stats_summary, update_settings,
+    cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
+    dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
+    stop_dictation, style_summaries, update_settings,
 };
 
 // Windows uses the real (but unverified) platform layer in `crate::win`.
 #[cfg(target_os = "windows")]
 pub use crate::win::{
-    current_settings, dictionary_add, dictionary_entries, dictionary_learn, dictionary_remove,
-    history, install, rebuild_providers, stats_summary, update_settings,
+    cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
+    dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
+    stop_dictation, style_summaries, update_settings,
 };
 
 // Other platforms (Linux, etc.): inert stubs so the crate still builds.
@@ -798,9 +975,19 @@ mod other {
     pub fn dictionary_add(_correct: String, _mishears: Vec<String>) {}
     pub fn dictionary_remove(_correct: &str) {}
     pub fn dictionary_learn(_correct: String, _mishears: Vec<String>) {}
+    pub fn cancel_dictation() {}
+    pub fn stop_dictation() {}
+    pub fn style_summary(mode: whimpr_core::StyleMode) -> whimpr_core::StyleSummary {
+        whimpr_core::StyleStore::default().summary(mode)
+    }
+    pub fn style_summaries() -> std::collections::HashMap<whimpr_core::StyleMode, whimpr_core::StyleSummary> {
+        whimpr_core::StyleMode::ALL.into_iter().map(|mode| (mode, style_summary(mode))).collect()
+    }
+    pub fn reset_style(_mode: whimpr_core::StyleMode) {}
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use other::{
-    current_settings, dictionary_add, dictionary_entries, dictionary_learn, dictionary_remove,
-    history, install, rebuild_providers, stats_summary, update_settings,
+    cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
+    dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
+    stop_dictation, style_summaries, update_settings,
 };

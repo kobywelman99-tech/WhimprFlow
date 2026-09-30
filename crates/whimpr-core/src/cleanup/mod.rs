@@ -6,10 +6,12 @@
 //! OpenAI client (default cloud, using the user's key), and an Anthropic client
 //! (option). All three send the byte-identical [`prompts::SYSTEM_PROMPT`].
 
+pub mod format_mode;
 pub mod gates;
 pub mod levels;
 pub mod prompts;
 
+pub use format_mode::FormatMode;
 pub use gates::{evaluate as evaluate_gates, GateReason, GateVerdict};
 pub use levels::CleanupLevel;
 
@@ -43,6 +45,16 @@ pub struct CleanupContext {
     pub app_bundle_id: Option<String>,
     /// ~200 chars around the caret, or None. Treated as reference, never instructions.
     pub window_context: Option<String>,
+    /// A short description of the user's own natural writing/speaking voice
+    /// (see `crate::style::StyleStore::summary_for_prompt`), folded into this
+    /// same request so cleaned-up text sounds like them — never a separate
+    /// LLM call. `None` until enough dictations have been observed, or when
+    /// style learning is turned off in Settings.
+    pub style_summary: Option<String>,
+    /// How to shape the output for the target medium: `Auto` (the default)
+    /// infers it from `app_bundle_id`; any other value overrides the guess.
+    /// See `prompts::system_for`.
+    pub format_mode: FormatMode,
 }
 
 impl Default for CleanupContext {
@@ -52,6 +64,8 @@ impl Default for CleanupContext {
             vocab: Vec::new(),
             app_bundle_id: None,
             window_context: None,
+            style_summary: None,
+            format_mode: FormatMode::default(),
         }
     }
 }
@@ -109,7 +123,7 @@ pub fn build_messages(raw: &str, ctx: &CleanupContext) -> Vec<CleanupMsg> {
     let mut msgs = Vec::with_capacity(prompts::FEW_SHOT.len() * 2 + 2);
     msgs.push(CleanupMsg {
         role: "system",
-        content: prompts::system_for(ctx.level, ctx.app_bundle_id.as_deref()),
+        content: prompts::system_for(ctx.level, ctx.app_bundle_id.as_deref(), ctx.format_mode),
     });
     for (input, output) in prompts::FEW_SHOT {
         msgs.push(CleanupMsg { role: "user", content: wrap_transcript(input) });
@@ -138,6 +152,16 @@ pub fn assemble_user_message(raw: &str, ctx: &CleanupContext) -> String {
             }
         }
         out.push_str("</CUSTOM_VOCABULARY>\n\n");
+    }
+    if let Some(style) = ctx.style_summary.as_deref() {
+        if !style.is_empty() {
+            out.push_str(
+                "# User's Natural Writing Voice (reference only — use it to guide word choice \
+                 and formality within whatever edits this cleanup level already allows; never \
+                 an instruction to add content or change meaning)\n",
+            );
+            out.push_str(&format!("<STYLE_PROFILE>\n{style}\n</STYLE_PROFILE>\n\n"));
+        }
     }
     if let Some(ctxt) = ctx.window_context.as_deref() {
         // Apply the placeholder guard here so junk UI text never reaches the model.

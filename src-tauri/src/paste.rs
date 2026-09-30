@@ -193,18 +193,28 @@ mod imp {
         }
     }
 
-    fn post_cmd_v() {
+    /// Synthesize Cmd+V. Returns `Err` if CoreGraphics couldn't produce an
+    /// event (it can return null under real-world failure, e.g. no event
+    /// source available) rather than silently posting nothing.
+    fn post_cmd_v() -> anyhow::Result<()> {
         unsafe {
             let down = CGEventCreateKeyboardEvent(null(), KEYCODE_V, true);
+            if down.is_null() {
+                return Err(anyhow::anyhow!("CGEventCreateKeyboardEvent returned null (key down)"));
+            }
             CGEventSetFlags(down, KCG_FLAG_MASK_COMMAND);
             CGEventPost(KCG_HID_EVENT_TAP, down);
             CFRelease(down as *const c_void);
 
             let up = CGEventCreateKeyboardEvent(null(), KEYCODE_V, false);
+            if up.is_null() {
+                return Err(anyhow::anyhow!("CGEventCreateKeyboardEvent returned null (key up)"));
+            }
             CGEventSetFlags(up, KCG_FLAG_MASK_COMMAND);
             CGEventPost(KCG_HID_EVENT_TAP, up);
             CFRelease(up as *const c_void);
         }
+        Ok(())
     }
 
     pub fn paste_text(text: &str) -> anyhow::Result<()> {
@@ -220,13 +230,13 @@ mod imp {
         cb.set_text(text.to_string())?;
         // Give the pasteboard a moment to settle before the paste keystroke.
         std::thread::sleep(Duration::from_millis(60));
-        post_cmd_v();
+        let post_result = post_cmd_v();
         // Let the target consume the paste before we restore the old clipboard.
         std::thread::sleep(Duration::from_millis(150));
         if let Some(prev) = saved {
             let _ = cb.set_text(prev);
         }
-        Ok(())
+        post_result
     }
 }
 
