@@ -26,6 +26,8 @@ export interface Settings {
   format_mode: FormatMode;
   // Re-read each dictation in context and fix words that don't make sense.
   review_enabled: boolean;
+  // Longest an on-device cleanup request may take before the raw transcript is pasted.
+  local_llm_timeout_ms: number;
 }
 
 // Mirrors `permissions::Grant` in src-tauri. A bare boolean couldn't tell
@@ -108,6 +110,7 @@ export const DEFAULT_SETTINGS: Settings = {
   style_learning_enabled: true,
   format_mode: "auto",
   review_enabled: true,
+  local_llm_timeout_ms: 3000,
 };
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

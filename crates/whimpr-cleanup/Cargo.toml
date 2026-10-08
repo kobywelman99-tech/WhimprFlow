@@ -10,6 +10,12 @@ license.workspace = true
 [dependencies]
 whimpr-core = { path = "../whimpr-core" }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+
+# Stands in for whimpr-llm-worker in the supervisor's tests (see src/bin/fake-llm-worker.rs).
+[[bin]]
+name = "fake-llm-worker"
+path = "src/bin/fake-llm-worker.rs"

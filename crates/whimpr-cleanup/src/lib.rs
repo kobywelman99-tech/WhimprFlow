@@ -3,6 +3,10 @@
 //! On any failure the caller falls back to the raw transcript — cleanup is an
 //! enhancement, never a gate.
 
+pub mod local;
+
+pub use local::{LocalConfig, LocalError, LocalLlm};
+
 use std::time::Duration;
 
 use whimpr_core::cleanup::{CleanupMsg, CleanupProvider, ProviderId};

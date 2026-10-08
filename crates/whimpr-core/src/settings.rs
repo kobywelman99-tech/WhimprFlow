@@ -58,6 +58,14 @@ pub struct Settings {
     /// cloud call per dictation; skipped for Raw and for the on-device model.
     #[serde(default = "default_true")]
     pub review_enabled: bool,
+    /// Longest a single on-device cleanup request may take before the worker is restarted
+    /// and the raw transcript is pasted instead.
+    #[serde(default = "default_local_llm_timeout_ms")]
+    pub local_llm_timeout_ms: u32,
+}
+
+fn default_local_llm_timeout_ms() -> u32 {
+    3000
 }
 
 fn default_true() -> bool {
@@ -77,6 +85,7 @@ impl Default for Settings {
             style_learning_enabled: true,
             format_mode: FormatMode::default(),
             review_enabled: true,
+            local_llm_timeout_ms: default_local_llm_timeout_ms(),
         }
     }
 }
@@ -106,6 +115,13 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.cleanup_mode, CleanupMode::Local);
         assert_eq!(s.cleanup_level, CleanupLevel::Light);
+    }
+
+    #[test]
+    fn an_old_settings_file_without_the_timeout_still_loads_with_the_default() {
+        let old = r#"{"cleanup_mode":"anthropic","cleanup_level":"light","openai_model":"m","anthropic_model":"a","sound_on_start":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!((s.cleanup_mode, s.local_llm_timeout_ms), (CleanupMode::Anthropic, 3000));
     }
 
     #[test]

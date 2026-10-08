@@ -2,37 +2,25 @@
 //! llama.cpp and whisper.cpp never link into the same binary). One JSON request
 //! per line over stdio: `{system,user}` -> `{text}`.
 
+#[cfg(target_os = "windows")]
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(target_os = "windows")]
+use std::path::Path;
+#[cfg(target_os = "windows")]
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
 
-use whimpr_core::cleanup::{CleanupMsg, CleanupProvider, ProviderId};
-
-/// The shared worker slot as a cleanup provider, so the pipeline treats the
-/// on-device model like any other. Locks only for the length of one request.
-pub struct LocalSlot<'a>(pub &'a Mutex<Option<LocalWorker>>);
-
-impl CleanupProvider for LocalSlot<'_> {
-    fn id(&self) -> ProviderId {
-        ProviderId::Local
-    }
-
-    fn complete(&self, messages: &[CleanupMsg]) -> anyhow::Result<String> {
-        let mut slot = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        match slot.as_mut() {
-            Some(worker) => worker.cleanup(messages),
-            None => anyhow::bail!("the on-device model isn't ready"),
-        }
-    }
-}
-
+/// The first, unsupervised worker client. Windows still uses it; it moves to
+/// `whimpr_cleanup::LocalLlm` (timeouts, restarts, warm-up) when Windows adopts the
+/// shared pipeline.
+#[cfg(target_os = "windows")]
 pub struct LocalWorker {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
 }
 
+#[cfg(target_os = "windows")]
 impl LocalWorker {
     pub fn spawn(worker_bin: &Path, model: &Path) -> anyhow::Result<Self> {
         let mut child = Command::new(worker_bin)
@@ -47,7 +35,8 @@ impl LocalWorker {
     }
 
     /// Send one cleanup request (system prompt + few-shot turns + transcript) and
-    /// read the response (blocks until the line comes).
+    /// read the response. Skips the worker's `{"ready":true}` line; blocks until the
+    /// answer comes, with no timeout.
     pub fn cleanup(
         &mut self,
         messages: &[whimpr_core::cleanup::CleanupMsg],
@@ -58,11 +47,16 @@ impl LocalWorker {
         self.stdin.write_all(line.as_bytes())?;
         self.stdin.flush()?;
 
-        let mut resp = String::new();
-        if self.stdout.read_line(&mut resp)? == 0 {
-            anyhow::bail!("local worker closed");
-        }
-        let v: serde_json::Value = serde_json::from_str(&resp)?;
+        let v = loop {
+            let mut resp = String::new();
+            if self.stdout.read_line(&mut resp)? == 0 {
+                anyhow::bail!("local worker closed");
+            }
+            let v: serde_json::Value = serde_json::from_str(&resp)?;
+            if v.get("ready").is_none() {
+                break v;
+            }
+        };
         if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
             anyhow::bail!("local llm: {err}");
         }
@@ -70,6 +64,7 @@ impl LocalWorker {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl Drop for LocalWorker {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -140,7 +135,8 @@ pub fn model_path() -> PathBuf {
     dir.join("qwen2.5-1.5b-instruct-q4_k_m.gguf")
 }
 
-/// Spawn the worker if both the binary and the model are present.
+/// Spawn the worker if both the binary and the model are present (Windows).
+#[cfg(target_os = "windows")]
 pub fn spawn_default() -> Option<LocalWorker> {
     let bin = worker_bin_path()?;
     let model = model_path();
@@ -158,4 +154,19 @@ pub fn spawn_default() -> Option<LocalWorker> {
             None
         }
     }
+}
+
+/// The supervised on-device model, if both the worker binary and a model file exist.
+/// Nothing runs until `start()` is called on it.
+#[cfg(not(target_os = "windows"))]
+pub fn build(timeout_ms: u32) -> Option<whimpr_cleanup::LocalLlm> {
+    let bin = worker_bin_path()?;
+    let model = model_path();
+    if !model.exists() {
+        eprintln!("[whimpr] local model not found at {}", model.display());
+        return None;
+    }
+    let mut cfg = whimpr_cleanup::LocalConfig::new(bin, model);
+    cfg.timeout = std::time::Duration::from_millis(u64::from(timeout_ms));
+    Some(whimpr_cleanup::LocalLlm::new(cfg))
 }

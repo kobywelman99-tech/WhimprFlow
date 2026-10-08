@@ -142,17 +142,27 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 ### Task 5: Local LLM worker robustness
 **Description:** Move the supervisor from `src-tauri/src/local_llm.rs` into `whimpr-cleanup/src/local.rs` (no Tauri dependency) so it's testable and implements `CleanupProvider::complete`. A reader thread + channel gives a hard timeout (`Settings.local_llm_timeout_ms`, default 3000, env override for tests). The worker prints a ready line after model load; the supervisor tracks Loading/Ready/Dead and never blocks a dictation while Loading. On timeout or crash: kill, respawn in the background, return an error so the pipeline pastes the gated raw transcript. Pre-warm at launch: spawn, wait for ready, send one tiny request. The `LOCAL` mutex is never held across a blocking read.
 **Acceptance criteria:**
-- [ ] Fake worker that **hangs** → request returns within timeout + small slack; next request succeeds after respawn
-- [ ] Fake worker that **exits** → error immediately, respawn, recovery
-- [ ] Fake worker that is **slow but ok** (under timeout) → succeeds; **garbage output** → error, no panic
-- [ ] While Loading, a request returns immediately (raw is pasted), not after a wait
-- [ ] Switching to Local mode later starts the worker (today `rebuild_providers` doesn't)
+- [x] Fake worker that **hangs** → request returns within timeout + small slack; next request succeeds after respawn
+- [x] Fake worker that **exits** → error immediately, respawn, recovery
+- [x] Fake worker that is **slow but ok** (under timeout) → succeeds; **garbage output** → error, no panic
+- [x] While Loading, a request returns immediately (raw is pasted), not after a wait
+- [x] Switching to Local mode later starts the worker (today `rebuild_providers` doesn't)
 **Verification:** `cargo test -p whimpr-cleanup` using a test-only `fake-llm-worker` bin (`CARGO_BIN_EXE_…`); manual: kill the real worker mid-session and dictate
+
+**Progress:**
+- [x] `whimpr_cleanup::local`: `LocalLlm` (implements `CleanupProvider`) with states Stopped / Loading / Ready, a reader thread so every request has a hard timeout, kill-and-restart-in-the-background on timeout, exit or unreadable output, a ready handshake, a warm-up request, and a retry delay after a failed start so a broken install can't respawn in a loop. 11 tests against `fake-llm-worker`; stable over 8 runs; **mutation-checked** (with restarts disabled the three recovery tests fail)
+- [x] The real worker prints `{"ready":true}` once its model is loaded. `Settings.local_llm_timeout_ms` (default 3000, old files load with the default), applied live when settings change
+- [x] `hotkey.rs`: `LOCAL` is now the supervisor; starts at launch (kept even in cloud modes, as before, because a missing cloud key falls back to it) and again whenever Local mode is chosen. A timeout or crash shows up as a logged cleanup failure and the gated raw transcript is pasted
+- [x] Windows keeps its old `LocalWorker` behind `cfg(windows)` (untouched policy); it now skips the ready line. **Unverified: no Windows toolchain here**
+- [ ] **Not tested with the real llama worker: there is no Qwen model on this machine** (only `ggml-base.en.bin`), so the ready line from the real binary and real timings are untested. Koby: install a model per `docs/MODELS.md`, build `cargo build --release -p whimpr-llm-worker`, set Cleanup Mode to Local, dictate, then `kill -STOP $(pgrep whimpr-llm-worker)` and dictate again: the second dictation should paste raw text after about 3 s and the next one should work
+- [ ] Watch the real numbers: Insights ▸ Speed shows cleanup p95; if long dictations time out at 3 s, raise `local_llm_timeout_ms` in settings.json (a 4B model can need more than 3 s for a long message)
+
 **Dependencies:** T1 · **Files:** `crates/whimpr-cleanup/src/local.rs` + test bin, `src-tauri/src/local_llm.rs` (removed/thin), `crates/whimpr-llm-worker/src/main.rs` (ready line), `settings.rs`, `hotkey.rs` · **Scope:** L
 
 ### Checkpoint 0
 - [ ] Review with Koby: Task 0–5 commits; Koby's recorded clips exist and the **baseline eval report** is saved in `eval/reports/`
 - [ ] Silence no longer pastes anything; a hung local worker no longer freezes dictation
+- Status: all five tasks are built and tested; **the real-world checks are still yours** (record the clips, try silence and a quick "yes", try Local mode with a real model, run `cargo check` on Windows)
 
 ---
 

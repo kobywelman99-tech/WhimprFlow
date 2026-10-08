@@ -2,7 +2,8 @@
 //!
 //! Loads a GGUF instruction model once, then serves one request per line of stdin:
 //! `{"system": "...", "user": "..."}` → `{"text": "..."}` on stdout. The WhimprFlow
-//! app spawns this and keeps it warm so cleanup is fast and fully offline.
+//! app spawns this and keeps it warm so cleanup is fast and fully offline. Once the model
+//! is loaded it prints `{"ready":true}`; see `whimpr-cleanup/src/local.rs` for the supervisor.
 //!
 //! Usage: `whimpr-llm-worker <model.gguf>` (or WHIMPR_LLM_MODEL env var).
 
@@ -63,6 +64,9 @@ fn main() -> anyhow::Result<()> {
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
+    // Tell the supervisor the model is loaded; every other line on stdout is a response.
+    writeln!(stdout, r#"{{"ready":true}}"#)?;
+    stdout.flush()?;
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {

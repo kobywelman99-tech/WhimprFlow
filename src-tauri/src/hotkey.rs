@@ -123,7 +123,8 @@ mod imp {
     static ASR: OnceLock<Arc<whimpr_asr::WhisperEngine>> = OnceLock::new();
     static OPENAI: OnceLock<Mutex<Option<whimpr_cleanup::OpenAiProvider>>> = OnceLock::new();
     static ANTHROPIC: OnceLock<Mutex<Option<whimpr_cleanup::AnthropicProvider>>> = OnceLock::new();
-    static LOCAL: OnceLock<Mutex<Option<crate::local_llm::LocalWorker>>> = OnceLock::new();
+    /// The supervised on-device model; `None` when the worker or model file is missing.
+    static LOCAL: OnceLock<Option<whimpr_cleanup::LocalLlm>> = OnceLock::new();
     static SETTINGS: OnceLock<Mutex<whimpr_core::Settings>> = OnceLock::new();
     static DICTIONARY: OnceLock<Mutex<whimpr_core::DictionaryStore>> = OnceLock::new();
     static BRAIN: OnceLock<Mutex<whimpr_core::brain::Brain>> = OnceLock::new();
@@ -440,6 +441,13 @@ mod imp {
         }
         let _ = new.save(&settings_path());
         rebuild_providers();
+        if let Some(Some(local)) = LOCAL.get() {
+            local.set_timeout(std::time::Duration::from_millis(u64::from(new.local_llm_timeout_ms)));
+            // Choosing Local mode starts the model if it isn't running (a no-op if it is).
+            if matches!(new.cleanup_mode, CleanupMode::Local) {
+                local.start();
+            }
+        }
     }
 
     /// (Re)build the cloud cleanup providers from the current keys + settings. Called
@@ -496,11 +504,11 @@ mod imp {
 
         let openai = OPENAI.get().map(|m| m.lock_recover());
         let anthropic = ANTHROPIC.get().map(|m| m.lock_recover());
-        let local = LOCAL.get().filter(|m| m.lock_recover().is_some()).map(crate::local_llm::LocalSlot);
+        let local = LOCAL.get().and_then(|l| l.as_ref()).filter(|l| l.is_ready());
         let providers = Providers {
             openai: openai.as_ref().and_then(|g| g.as_ref()).map(|p| p as &dyn whimpr_core::CleanupProvider),
             anthropic: anthropic.as_ref().and_then(|g| g.as_ref()).map(|p| p as &dyn whimpr_core::CleanupProvider),
-            local: local.as_ref().map(|p| p as &dyn whimpr_core::CleanupProvider),
+            local: local.map(|p| p as &dyn whimpr_core::CleanupProvider),
         };
         let env = Env { settings: &settings, dictionary: &dictionary, style_summary, app_bundle_id, providers };
         let out = pipeline::run(raw, &env);
@@ -981,12 +989,12 @@ mod imp {
         let _ = STYLE.set(Mutex::new(whimpr_core::StyleStore::load(&style_path())));
         rebuild_providers();
 
-        // Start the local cleanup worker in the background (model load takes a few
-        // seconds; the first local cleanup waits for it, subsequent ones are fast).
-        std::thread::spawn(|| {
-            let worker = crate::local_llm::spawn_default();
-            let _ = LOCAL.set(Mutex::new(worker));
-        });
+        // Start the on-device cleanup model in the background and warm it. Until it is ready,
+        // a local cleanup falls back to the raw transcript instead of waiting for the load.
+        let _ = LOCAL.set(crate::local_llm::build(current_settings().local_llm_timeout_ms));
+        if let Some(Some(local)) = LOCAL.get() {
+            local.start();
+        }
 
         // Accessibility is the ONE permission that makes the Fn CGEventTap global AND
         // lets us post the Cmd+V paste into other apps. Without it, a keyboard tap is
