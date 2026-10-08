@@ -226,7 +226,8 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 - [x] `whimpr-eval --engine whisper|parakeet --model --parakeet-dir` runs any engine through the identical pipeline
 - [ ] **Benchmark below is on a synthetic voice (macOS `say`) plus the public-domain JFK clip, not yours.** Re-run on your recordings before deciding anything: `cargo run --release -p whimpr-eval -- --engine parakeet --provider anthropic` and the same with `--engine whisper --model <file>`
 - [x] **Run for real, headlessly:** launched the actual debug app with isolated empty home folders and real models in four configurations and read its log. That run **found a bug in my code**: with Parakeet chosen and installed, the app loaded whisper, because the model thread started before the settings were loaded and read the defaults. Fixed structurally (the engine is passed into `reload_asr_model` instead of read from a global, the choice of files is the tested pure function `choose_engine`, and the thread starts after settings load). After the fix: whisper-only loads and warms (83 ms); Parakeet chosen loads Parakeet (64 ms); Parakeet chosen but missing falls back to whisper with a message; nothing installed reports it
-- [ ] Could not do: click through the app window. UI scripting sees no windows here (Accessibility isn't granted to this process) and screenshots are blocked, so the download progress bar, the Use button and the live engine swap on a settings change have **not** been exercised
+- [x] **UI rendered and checked in headless Chrome** with Tauri's `invoke` mocked (a DevTools-protocol script, kept out of the repo): the model card shows Fast "In use", Best downloading with a live progress bar and Cancel (driven by a mocked progress event), and Parakeet with "Use"; the Acknowledgements card opens and scrolls. This proves the layout and the progress-event wiring, **not** the backend behind it
+- [ ] Could not do: click through the real app window. UI scripting sees no windows here (Accessibility isn't granted to this process) and screenshots of other apps are blocked, so a real in-app download, the Use button's effect and the live engine swap on a settings change have **not** been exercised against the real backend. The Windows target can't be type-checked here either (native dependencies need Microsoft's SDK; I tried and removed the target again)
 - [ ] Koby: Windows `cargo check`; the Windows engine can't be swapped yet, so Parakeet there needs the shared pipeline first
 - [ ] Open before release: NVIDIA Parakeet is CC-BY-4.0 and needs attribution in the app's acknowledgements (added to the existing item)
 
@@ -236,6 +237,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 
 ### Checkpoint 1
 - [ ] Review with Koby: first-run flow on a clean model dir; benchmark table (base.en vs turbo vs Parakeet: WER, p50/p95); decision on the Windows default
+- Status (2026-10-08): Tasks 6-8 built, tested, run against the real app where the machine allows, and the one bug that run found is fixed. What is left is only what needs your hands, voice or a Windows machine
 
 ---
 
@@ -311,7 +313,9 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 **Dependencies:** all phases · **Files:** `CLAUDE.md`, `docs/BUILD-STATUS.md`, `README.md`, `docs/SPEC.md` · **Scope:** S
 
 ### Open before any release (found in code review)
-- [ ] **Acknowledgements:** the shipped desktop and iOS apps must show the licences of bundled third-party data: NVIDIA Parakeet TDT 0.6B v2 (CC-BY-4.0, attribution required; downloaded by the user, not bundled), Silero VAD (MIT, `crates/whimpr-vad/models/LICENSE-SILERO`) and CMUdict (BSD-style, `crates/whimpr-core/data/CMUDICT-LICENSE`, whose binary-redistribution clause requires reproducing its notice). A screen or file in the app, not just the repo
+- [x] **Acknowledgements, desktop:** Help now has an Acknowledgements card showing `ui/src/hub/third-party-notices.md`, which holds the full licence texts (Parakeet CC BY 4.0 attribution, OpenAI Whisper, whisper.cpp, Silero, ONNX Runtime, CMUdict) pulled from the upstream licence files, plus an honest note on the word-frequency data. Three tests in `whimpr-models/tests/notices.rs` fail if a shipped component loses its notice or the embedded licence text drifts from the licence files. Seen rendered in headless Chrome
+- [ ] **Acknowledgements, iOS:** not done. The iOS app also embeds CMUdict and the word frequencies and needs the same screen (iOS is outside this plan's scope; flagging it)
+- [ ] (original item, kept for the iOS half) the shipped apps must show the licences of bundled third-party data: NVIDIA Parakeet TDT 0.6B v2 (CC-BY-4.0, attribution required; downloaded by the user, not bundled), Silero VAD (MIT, `crates/whimpr-vad/models/LICENSE-SILERO`) and CMUdict (BSD-style, `crates/whimpr-core/data/CMUDICT-LICENSE`, whose binary-redistribution clause requires reproducing its notice). A screen or file in the app, not just the repo
 - [ ] **Word-frequency data licence is unresolved.** `crates/whimpr-core/data/wordfreq.txt` comes from Norvig's `count_1w.txt`; his MIT grant covers his *code*, and the data is described only as derived from the Google Web Trillion Word Corpus via the LDC. Earlier notes in this file and in commit messages called it MIT; that was not verified and should be read as unresolved. It feeds the voice brain's word prior, and removing it would need a replacement (e.g. counts computed from CC0 text such as Common Voice's sentences). **Decision (Koby, 2026-10-07): keep it for now; revisit before any release**
 - [x] Eval recordings and reports are now git-ignored (`eval/fixtures/*.wav`, `eval/reports/`); the manifest and the recording script stay tracked
 
