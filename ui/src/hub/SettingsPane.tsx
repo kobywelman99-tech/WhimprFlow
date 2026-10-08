@@ -248,6 +248,27 @@ export function SettingsPane({
 
       <Card style={{ marginBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: theme.textStrong }}>Check it makes sense</div>
+            <div style={{ color: theme.textMuted, fontSize: 12.5, marginTop: 4, maxWidth: 480 }}>
+              Before a dictation is pasted, re-reads it as its recipient would and fixes any word that doesn't
+              fit, using what you actually said. Changes only a few words and never rewrites. One extra call to
+              your OpenAI or Anthropic model; skipped for Raw and the on-device model.
+            </div>
+          </div>
+          <Segmented
+            options={[
+              { value: "on", label: "On" },
+              { value: "off", label: "Off" },
+            ]}
+            value={settings.review_enabled ? "on" : "off"}
+            onChange={(v) => onChange({ ...settings, review_enabled: v === "on" })}
+          />
+        </div>
+      </Card>
+
+      <Card style={{ marginBottom: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <div style={{ fontSize: 14, fontWeight: 600, color: theme.textStrong }}>
             Play a sound when recording starts
           </div>

@@ -126,6 +126,7 @@ mod imp {
     static LOCAL: OnceLock<Mutex<Option<crate::local_llm::LocalWorker>>> = OnceLock::new();
     static SETTINGS: OnceLock<Mutex<whimpr_core::Settings>> = OnceLock::new();
     static DICTIONARY: OnceLock<Mutex<whimpr_core::DictionaryStore>> = OnceLock::new();
+    static BRAIN: OnceLock<Mutex<whimpr_core::brain::Brain>> = OnceLock::new();
     static STATS: OnceLock<Mutex<whimpr_core::StatsStore>> = OnceLock::new();
     static STYLE: OnceLock<Mutex<whimpr_core::StyleStore>> = OnceLock::new();
 
@@ -184,6 +185,9 @@ mod imp {
     }
     fn dict_path() -> PathBuf {
         support_dir().join("dictionary.json")
+    }
+    fn brain_path() -> PathBuf {
+        support_dir().join("brain.json")
     }
     fn stats_path() -> PathBuf {
         support_dir().join("stats.json")
@@ -273,6 +277,84 @@ mod imp {
             store.add(correct, mishears, whimpr_core::DictSource::Auto);
             let _ = store.save(&dict_path());
         }
+    }
+
+    /// Teach the brain from (meant, heard) pairs, e.g. a calibration session or a
+    /// correction, and save it.
+    pub fn brain_learn(pairs: Vec<(String, String)>) {
+        if let Some(m) = BRAIN.get() {
+            let mut brain = m.lock_recover();
+            for (meant, heard) in pairs {
+                brain.observe(&meant, &heard);
+            }
+            let _ = brain.save(&brain_path());
+        }
+    }
+
+    /// What the brain has noticed, for the Hub's Calibrate page.
+    pub fn brain_summary() -> whimpr_core::brain::Summary {
+        BRAIN
+            .get()
+            .map(|m| m.lock_recover().summary())
+            .unwrap_or_else(|| whimpr_core::brain::Brain::default().summary())
+    }
+
+    /// Forget everything the brain learned.
+    pub fn brain_reset() {
+        if let Some(m) = BRAIN.get() {
+            let mut brain = m.lock_recover();
+            brain.reset();
+            let _ = brain.save(&brain_path());
+        }
+    }
+
+    /// Fix known mishears in a raw transcript: the dictionary's "also heard as"
+    /// entries, then word pairs the brain has seen repeat.
+    fn fix_mishears(raw: &str) -> String {
+        let fixed = DICTIONARY
+            .get()
+            .map(|m| m.lock_recover().apply_replacements(raw))
+            .unwrap_or_else(|| raw.to_string());
+        BRAIN.get().map(|m| m.lock_recover().correct(&fixed)).unwrap_or(fixed)
+    }
+
+    /// The user's spellings (dictionary + words the brain has seen misheard) as a
+    /// whisper `initial_prompt`.
+    fn whisper_prompt() -> Option<String> {
+        let mut words = DICTIONARY.get().map(|m| m.lock_recover().bias_words()).unwrap_or_default();
+        if let Some(m) = BRAIN.get() {
+            words.extend(m.lock_recover().bias_words(40));
+        }
+        whimpr_asr::vocab_prompt(&words)
+    }
+
+    static CAL_CAPTURE: OnceLock<Mutex<Option<whimpr_audio::CaptureHandle>>> = OnceLock::new();
+
+    /// Start recording one calibration line (separate from the dictation hotkey).
+    pub fn calibration_record_start() -> Result<(), String> {
+        let slot = CAL_CAPTURE.get_or_init(|| Mutex::new(None));
+        if slot.lock_recover().is_some() {
+            return Ok(());
+        }
+        let handle = whimpr_audio::start(|_| {}).map_err(|e| format!("Couldn't start the microphone: {e}"))?;
+        *slot.lock_recover() = Some(handle);
+        Ok(())
+    }
+
+    /// Stop recording and return exactly what the recogniser heard: no
+    /// replacements or cleanup, so it can be compared with the prompt text.
+    pub fn calibration_record_stop() -> Result<String, String> {
+        let handle = CAL_CAPTURE
+            .get()
+            .and_then(|s| s.lock_recover().take())
+            .ok_or_else(|| "Nothing is being recorded.".to_string())?;
+        let res = handle.stop().ok_or_else(|| "No audio was captured.".to_string())?;
+        let asr = ASR.get().cloned().ok_or_else(|| "The speech model isn't ready yet.".to_string())?;
+        let pcm = whimpr_audio::resample_to_16k(&res.samples, res.sample_rate);
+        let t = asr
+            .transcribe_with_prompt(&pcm, whisper_prompt().as_deref())
+            .map_err(|e| e.to_string())?;
+        Ok(t.text)
     }
 
     /// The learned style profile for one mode, for the Hub's Style page.
@@ -378,6 +460,50 @@ mod imp {
     /// dictionary vocabulary relevant to this utterance. Falls back to raw whenever
     /// cleanup is off, the provider is unavailable, it errors, or the gates reject it.
     fn clean_transcript(app: &AppHandle, raw: &str) -> String {
+        let cleaned = clean_with_model(app, raw);
+        review_transcript(raw, cleaned)
+    }
+
+    /// The last read: does the message make sense? Repairs only words that don't, using
+    /// what was heard. Cloud models only; any failure keeps the message as it is.
+    fn review_transcript(heard: &str, draft: String) -> String {
+        let settings = current_settings();
+        if !settings.review_enabled
+            || matches!(settings.cleanup_mode, CleanupMode::Raw)
+            || settings.cleanup_level.bypasses_llm()
+        {
+            return draft;
+        }
+        let vocab = DICTIONARY
+            .get()
+            .map(|d| d.lock_recover().prefilter(heard, 15))
+            .unwrap_or_default();
+        let outcome = match settings.cleanup_mode {
+            CleanupMode::OpenAi => OPENAI
+                .get()
+                .and_then(|m| m.lock_recover().as_ref().map(|p| whimpr_core::review::run(p, heard, &draft, None, &vocab))),
+            CleanupMode::Anthropic => ANTHROPIC
+                .get()
+                .and_then(|m| m.lock_recover().as_ref().map(|p| whimpr_core::review::run(p, heard, &draft, None, &vocab))),
+            _ => None,
+        };
+        match outcome {
+            Some(o) if o.changed => {
+                let fixes: Vec<String> = o.changes.iter().map(|c| format!("{} → {}", c.from, c.to)).collect();
+                eprintln!("[whimpr] SENSE CHECK fixed: {}", fixes.join(", "));
+                o.text
+            }
+            Some(o) => {
+                if let Some(why) = o.rejected {
+                    eprintln!("[whimpr] sense check: {why}");
+                }
+                draft
+            }
+            None => draft,
+        }
+    }
+
+    fn clean_with_model(app: &AppHandle, raw: &str) -> String {
         let settings = current_settings();
         let level = settings.cleanup_level;
         if matches!(settings.cleanup_mode, CleanupMode::Raw) || level.bypasses_llm() {
@@ -681,9 +807,11 @@ mod imp {
                         return;
                     };
                     let pcm = whimpr_audio::resample_to_16k(&res.samples, res.sample_rate);
-                    match asr.transcribe(&pcm) {
+                    match asr.transcribe_with_prompt(&pcm, whisper_prompt().as_deref()) {
                         Ok(t) => {
-                            let raw = t.text;
+                            // Known mishears (voice calibration + dictionary) are fixed
+                            // before anything else, so every cleanup mode benefits.
+                            let raw = fix_mishears(&t.text);
                             eprintln!("[whimpr] TRANSCRIPT: \"{}\"", raw);
                             // Passively learn the user's voice from the raw transcript —
                             // pure local text counting, no LLM call, regardless of which
@@ -838,6 +966,7 @@ mod imp {
         );
         let _ = SETTINGS.set(Mutex::new(settings));
         let _ = DICTIONARY.set(Mutex::new(dict));
+        let _ = BRAIN.set(Mutex::new(whimpr_core::brain::Brain::load(&brain_path())));
         let _ = STATS.set(Mutex::new(whimpr_core::StatsStore::load(&stats_path())));
         let _ = STYLE.set(Mutex::new(whimpr_core::StyleStore::load(&style_path())));
         rebuild_providers();
@@ -941,6 +1070,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 pub use imp::{
+    brain_learn, brain_reset, brain_summary, calibration_record_start, calibration_record_stop,
     cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
     dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
     stop_dictation, style_summaries, update_settings,
@@ -949,6 +1079,7 @@ pub use imp::{
 // Windows uses the real (but unverified) platform layer in `crate::win`.
 #[cfg(target_os = "windows")]
 pub use crate::win::{
+    brain_learn, brain_reset, brain_summary, calibration_record_start, calibration_record_stop,
     cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
     dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
     stop_dictation, style_summaries, update_settings,
@@ -975,6 +1106,17 @@ mod other {
     pub fn dictionary_add(_correct: String, _mishears: Vec<String>) {}
     pub fn dictionary_remove(_correct: &str) {}
     pub fn dictionary_learn(_correct: String, _mishears: Vec<String>) {}
+    pub fn brain_learn(_pairs: Vec<(String, String)>) {}
+    pub fn brain_summary() -> whimpr_core::brain::Summary {
+        whimpr_core::brain::Brain::default().summary()
+    }
+    pub fn brain_reset() {}
+    pub fn calibration_record_start() -> Result<(), String> {
+        Err("Voice calibration recording isn't available on this platform yet.".into())
+    }
+    pub fn calibration_record_stop() -> Result<String, String> {
+        Err("Voice calibration recording isn't available on this platform yet.".into())
+    }
     pub fn cancel_dictation() {}
     pub fn stop_dictation() {}
     pub fn style_summary(mode: whimpr_core::StyleMode) -> whimpr_core::StyleSummary {
@@ -987,6 +1129,7 @@ mod other {
 }
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub use other::{
+    brain_learn, brain_reset, brain_summary, calibration_record_start, calibration_record_stop,
     cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
     dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
     stop_dictation, style_summaries, update_settings,

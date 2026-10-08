@@ -67,11 +67,14 @@ final class SpeechEngine {
     }
 
     /// Starts transcribing `input`. `vocabulary` (the user's dictionary) nudges
-    /// the recogniser toward those spellings. `onText` gets the running
+    /// the recogniser toward those spellings. `choose` picks among the
+    /// recogniser's candidate transcriptions for each finished stretch (best
+    /// first); without it the first is used. `onText` gets the running
     /// transcript, including words that may still change.
     func begin(
         input: AsyncStream<AnalyzerInput>,
         vocabulary: [String] = [],
+        choose: (@MainActor ([String]) -> String)? = nil,
         onText: @escaping @MainActor (String) -> Void
     ) async throws -> Utterance {
         guard let locale, let audioFormat else { throw EngineError.notPrepared }
@@ -86,7 +89,7 @@ final class SpeechEngine {
             for try await result in transcriber.results {
                 let text = String(result.text.characters)
                 if result.isFinal {
-                    finalized += text
+                    finalized += choose.map { Self.pick(text, result.alternatives, with: $0) } ?? text
                     onText(finalized)
                 } else {
                     onText(finalized + text)
@@ -117,12 +120,21 @@ final class SpeechEngine {
         utterance.results.cancel()
     }
 
+    /// The recogniser's first choice and its alternatives, without repeats.
+    private static func pick(_ text: String, _ alternatives: [AttributedString], with choose: @MainActor ([String]) -> String) -> String {
+        var candidates = [text]
+        for alternative in alternatives.map({ String($0.characters) }) where !candidates.contains(alternative) {
+            candidates.append(alternative)
+        }
+        return choose(candidates)
+    }
+
     private func makeTranscriber(locale: Locale) -> DictationTranscriber {
         DictationTranscriber(
             locale: locale,
             contentHints: [],
             transcriptionOptions: [.punctuation],
-            reportingOptions: [.volatileResults],
+            reportingOptions: [.volatileResults, .alternativeTranscriptions],
             attributeOptions: []
         )
     }

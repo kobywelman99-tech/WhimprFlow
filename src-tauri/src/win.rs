@@ -50,6 +50,7 @@ static LOCAL: OnceLock<Mutex<Option<crate::local_llm::LocalWorker>>> = OnceLock:
 static OPENAI: OnceLock<Mutex<Option<whimpr_cleanup::OpenAiProvider>>> = OnceLock::new();
 static SETTINGS: OnceLock<Mutex<whimpr_core::Settings>> = OnceLock::new();
 static DICTIONARY: OnceLock<Mutex<whimpr_core::DictionaryStore>> = OnceLock::new();
+static BRAIN: OnceLock<Mutex<whimpr_core::brain::Brain>> = OnceLock::new();
 static STATS: OnceLock<Mutex<whimpr_core::StatsStore>> = OnceLock::new();
 static STYLE: OnceLock<Mutex<whimpr_core::StyleStore>> = OnceLock::new();
 
@@ -61,6 +62,10 @@ fn support_dir() -> std::path::PathBuf {
 fn settings_path() -> std::path::PathBuf {
     support_dir().join("settings.json")
 }
+fn brain_path() -> std::path::PathBuf {
+    dict_path().with_file_name("brain.json")
+}
+
 fn dict_path() -> std::path::PathBuf {
     support_dir().join("dictionary.json")
 }
@@ -177,6 +182,40 @@ fn current_settings_inner() -> whimpr_core::Settings {
 }
 
 fn clean_transcript(raw: &str) -> String {
+    let cleaned = clean_with_model(raw);
+    review_transcript(raw, cleaned)
+}
+
+/// The last read: does the message make sense? Repairs only words that don't, using
+/// what was heard. Cloud models only; any failure keeps the message as it is.
+fn review_transcript(heard: &str, draft: String) -> String {
+    let settings = current_settings_inner();
+    if !settings.review_enabled
+        || matches!(settings.cleanup_mode, CleanupMode::Raw)
+        || settings.cleanup_level.bypasses_llm()
+    {
+        return draft;
+    }
+    let vocab = DICTIONARY
+        .get()
+        .map(|d| d.lock().unwrap().prefilter(heard, 15))
+        .unwrap_or_default();
+    let outcome = match settings.cleanup_mode {
+        CleanupMode::OpenAi => OPENAI
+            .get()
+            .and_then(|m| m.lock().unwrap().as_ref().map(|p| whimpr_core::review::run(p, heard, &draft, None, &vocab))),
+        CleanupMode::Anthropic => ANTHROPIC
+            .get()
+            .and_then(|m| m.lock().unwrap().as_ref().map(|p| whimpr_core::review::run(p, heard, &draft, None, &vocab))),
+        _ => None,
+    };
+    match outcome {
+        Some(o) if o.changed => o.text,
+        _ => draft,
+    }
+}
+
+fn clean_with_model(raw: &str) -> String {
     let settings = current_settings_inner();
     let level = settings.cleanup_level;
     if matches!(settings.cleanup_mode, CleanupMode::Raw) || level.bypasses_llm() {
@@ -301,8 +340,20 @@ fn on_ptt_up() {
             return;
         };
         let pcm = whimpr_audio::resample_to_16k(&res.samples, res.sample_rate);
-        match asr.transcribe(&pcm) {
-            Ok(t) => {
+        let mut words = DICTIONARY.get().map(|m| m.lock().unwrap().bias_words()).unwrap_or_default();
+        if let Some(m) = BRAIN.get() {
+            words.extend(m.lock().unwrap().bias_words(40));
+        }
+        let prompt = whimpr_asr::vocab_prompt(&words);
+        match asr.transcribe_with_prompt(&pcm, prompt.as_deref()) {
+            Ok(mut t) => {
+                // Known mishears (voice calibration + dictionary) are fixed first.
+                if let Some(m) = DICTIONARY.get() {
+                    t.text = m.lock().unwrap().apply_replacements(&t.text);
+                }
+                if let Some(m) = BRAIN.get() {
+                    t.text = m.lock().unwrap().correct(&t.text);
+                }
                 let settings_now = current_settings_inner();
                 if settings_now.style_learning_enabled {
                     if let Some(m) = STYLE.get() {
@@ -431,6 +482,7 @@ pub fn install(app: AppHandle) {
     let _ = CLOCK.set(Instant::now());
     let _ = SETTINGS.set(Mutex::new(whimpr_core::Settings::load(&settings_path())));
     let _ = DICTIONARY.set(Mutex::new(whimpr_core::DictionaryStore::load(&dict_path())));
+    let _ = BRAIN.set(Mutex::new(whimpr_core::brain::Brain::load(&brain_path())));
     let _ = STATS.set(Mutex::new(whimpr_core::StatsStore::load(&stats_path())));
     let _ = STYLE.set(Mutex::new(whimpr_core::StyleStore::load(&style_path())));
     let _ = OPENAI.set(Mutex::new(None));
@@ -548,6 +600,40 @@ pub fn dictionary_add(correct: String, mishears: Vec<String>) {
         store.add(correct, mishears, whimpr_core::DictSource::Manual);
         let _ = store.save(&dict_path());
     }
+}
+
+pub fn brain_learn(pairs: Vec<(String, String)>) {
+    if let Some(m) = BRAIN.get() {
+        let mut brain = m.lock().unwrap();
+        for (meant, heard) in pairs {
+            brain.observe(&meant, &heard);
+        }
+        let _ = brain.save(&brain_path());
+    }
+}
+
+pub fn brain_summary() -> whimpr_core::brain::Summary {
+    BRAIN
+        .get()
+        .map(|m| m.lock().unwrap().summary())
+        .unwrap_or_else(|| whimpr_core::brain::Brain::default().summary())
+}
+
+pub fn brain_reset() {
+    if let Some(m) = BRAIN.get() {
+        let mut brain = m.lock().unwrap();
+        brain.reset();
+        let _ = brain.save(&brain_path());
+    }
+}
+
+// Recording a calibration line on Windows isn't wired up yet.
+pub fn calibration_record_start() -> Result<(), String> {
+    Err("Voice calibration recording isn't available on Windows yet.".into())
+}
+
+pub fn calibration_record_stop() -> Result<String, String> {
+    Err("Voice calibration recording isn't available on Windows yet.".into())
 }
 
 pub fn dictionary_remove(correct: &str) {

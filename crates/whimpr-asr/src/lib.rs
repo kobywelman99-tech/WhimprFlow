@@ -21,6 +21,30 @@ impl WhisperEngine {
             .map_err(|e| anyhow::anyhow!("failed to load whisper model: {e}"))?;
         Ok(Self { ctx })
     }
+
+    /// Like [`AsrEngine::transcribe`], but primes whisper with `prompt` (the
+    /// user's vocabulary), which nudges it toward those spellings.
+    pub fn transcribe_with_prompt(&self, pcm16k: &[f32], prompt: Option<&str>) -> anyhow::Result<Transcript> {
+        self.transcribe_inner(pcm16k, prompt)
+    }
+}
+
+/// Build a whisper `initial_prompt` from dictionary spellings: a short comma
+/// list, capped (whisper only reads the last ~220 tokens of a prompt, and a
+/// long one crowds out the audio).
+pub fn vocab_prompt(words: &[String]) -> Option<String> {
+    const MAX_CHARS: usize = 400;
+    let mut out = String::new();
+    for w in words.iter().map(|w| w.trim()).filter(|w| !w.is_empty()) {
+        if out.len() + w.len() + 2 > MAX_CHARS {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        out.push_str(w);
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 impl AsrEngine for WhisperEngine {
@@ -35,6 +59,12 @@ impl AsrEngine for WhisperEngine {
     }
 
     fn transcribe(&self, pcm16k: &[f32]) -> anyhow::Result<Transcript> {
+        self.transcribe_inner(pcm16k, None)
+    }
+}
+
+impl WhisperEngine {
+    fn transcribe_inner(&self, pcm16k: &[f32], prompt: Option<&str>) -> anyhow::Result<Transcript> {
         let mut state = self
             .ctx
             .create_state()
@@ -54,6 +84,9 @@ impl AsrEngine for WhisperEngine {
         // producing the sentence twice. Single-segment mode avoids that.
         params.set_single_segment(true);
         params.set_no_context(true);
+        if let Some(prompt) = prompt {
+            params.set_initial_prompt(prompt);
+        }
 
         state
             .full(params, pcm16k)

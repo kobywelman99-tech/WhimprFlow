@@ -19,6 +19,8 @@ struct DictationRecord: Codable, Identifiable, Equatable {
     /// The cleanup level used; nil when cleanup was off.
     var level: DictationLevel?
     var cleaned: Bool
+    /// Words the sense check changed ("rapport → report"); nil when none.
+    var fixes: [String]?
 }
 
 /// Every dictation, kept on the phone until the user deletes it: the record

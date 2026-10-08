@@ -51,10 +51,14 @@ final class DictationService {
     private let learn: (String) -> Void
     /// The dictionary's words, as hints for the speech recogniser.
     private let vocabulary: () -> [String]
+    /// Picks among the recogniser's candidate transcriptions (see BrainModel).
+    private let rescore: @MainActor ([String]) -> String
     private let recorder = Recorder()
     private var utterance: SpeechEngine.Utterance?
     /// The keyboard pill's level for the dictation in progress.
     private var levelOverride: Level?
+    /// The text already in the box when this dictation started.
+    private var conversationContext: String?
     private var observers: [NSObjectProtocol] = []
     /// The in-app button opened the session just for one dictation.
     private var endSessionAfterUtterance = false
@@ -63,12 +67,14 @@ final class DictationService {
         cleanup: CleanupPipeline,
         history: DictationHistory? = nil,
         learn: @escaping (String) -> Void = { _ in },
-        vocabulary: @escaping () -> [String] = { [] }
+        vocabulary: @escaping () -> [String] = { [] },
+        rescore: @escaping @MainActor ([String]) -> String = { $0.first ?? "" }
     ) {
         self.cleanup = cleanup
         self.history = history
         self.learn = learn
         self.vocabulary = vocabulary
+        self.rescore = rescore
     }
 
     // MARK: Session
@@ -152,6 +158,8 @@ final class DictationService {
 
     func beginUtterance(
         level: Level? = nil,
+        useBrain: Bool = true,
+        context: String? = nil,
         onText: @escaping @MainActor (String) -> Void = { _ in },
         onLevel: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws {
@@ -161,9 +169,10 @@ final class DictationService {
         lastLatency = nil
         lastCleanup = nil
         levelOverride = level
+        conversationContext = context
         let input = try recorder.beginCapture(convertingTo: format, onLevel: onLevel)
         do {
-            utterance = try await engine.begin(input: input, vocabulary: vocabulary()) { [weak self] text in
+            utterance = try await engine.begin(input: input, vocabulary: vocabulary(), choose: useBrain ? rescore : nil) { [weak self] text in
                 self?.transcript = text
                 onText(text)
             }
@@ -191,14 +200,15 @@ final class DictationService {
             let heard = ContinuousClock.now - stoppedAt
             phase = .cleaning
             onCleaning()
-            let result = await cleanup.clean(raw, level: levelOverride)
+            let result = await cleanup.clean(raw, level: levelOverride, context: conversationContext)
             history?.add(DictationRecord(
                 date: Date(),
                 raw: raw,
                 text: result.text,
                 source: source,
                 level: cleanup.level(for: levelOverride).map(DictationLevel.init),
-                cleaned: result.cleaned
+                cleaned: result.cleaned,
+                fixes: result.fixes.isEmpty ? nil : result.fixes.map { "\($0.from) → \($0.to)" }
             ))
             // Learn from what was said, not the cleaned text: the point is
             // how Koby talks, not how Claude rewrote it.
@@ -212,6 +222,25 @@ final class DictationService {
             return result.text
         } catch {
             log.error("Transcription failed: \(error.localizedDescription, privacy: .public)")
+            phase = .failed(error.localizedDescription)
+            throw error
+        }
+    }
+
+    /// Stops listening and returns exactly what the recogniser heard: no
+    /// replacements, cleanup, history or style learning. Voice calibration
+    /// compares this with the words it asked for.
+    func finishRawUtterance() async throws -> String {
+        guard let utterance else { throw DictationError.notRecording }
+        self.utterance = nil
+        phase = .transcribing
+        try? await Task.sleep(for: .milliseconds(150))
+        recorder.endCapture()
+        do {
+            let raw = try await engine.finish(utterance)
+            phase = .idle
+            return raw
+        } catch {
             phase = .failed(error.localizedDescription)
             throw error
         }

@@ -6,6 +6,7 @@ struct ContentView: View {
     let settings: CleanupSettings
     let cleanup: CleanupPipeline
     let dictionary: DictionaryModel
+    let brain: BrainModel
     let history: DictationHistory
     let style: StyleModel
     let setup: SetupModel
@@ -50,6 +51,15 @@ struct ContentView: View {
                         }
                     }
                     NavigationLink {
+                        BrainView(brain: brain, dictation: dictation)
+                    } label: {
+                        LabeledContent {
+                            Text(brain.overview.observations == 0 ? "Not set up" : "\(brain.overview.observations)")
+                        } label: {
+                            Label("Your voice", systemImage: "waveform.badge.mic")
+                        }
+                    }
+                    NavigationLink {
                         StyleView(model: style)
                     } label: {
                         LabeledContent {
@@ -59,7 +69,7 @@ struct ContentView: View {
                         }
                     }
                     NavigationLink {
-                        HistoryView(history: history)
+                        HistoryView(history: history, brain: brain)
                     } label: {
                         LabeledContent {
                             Text("\(history.records.count)")
@@ -235,5 +245,5 @@ private struct DictationPanel: View {
     let settings = CleanupSettings()
     let cleanup = CleanupPipeline(settings: settings)
     let dictation = DictationService(cleanup: cleanup)
-    ContentView(dictation: dictation, flow: FlowController(dictation: dictation, settings: settings), settings: settings, cleanup: cleanup, dictionary: DictionaryModel(), history: DictationHistory(), style: StyleModel(), setup: SetupModel(settings: settings))
+    ContentView(dictation: dictation, flow: FlowController(dictation: dictation, settings: settings), settings: settings, cleanup: cleanup, dictionary: DictionaryModel(), brain: BrainModel(), history: DictationHistory(), style: StyleModel(), setup: SetupModel(settings: settings))
 }

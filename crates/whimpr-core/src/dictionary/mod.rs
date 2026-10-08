@@ -84,6 +84,61 @@ impl DictionaryStore {
         self.entries.len() != before
     }
 
+    /// Deterministically rewrite known mishears to their correct spelling.
+    /// Whole-word (and whole-phrase) matches only, case-insensitive; the source
+    /// text's capitalisation style (ALL CAPS / Capitalised) carries over to
+    /// `correct` unless `correct` has its own mixed case (e.g. "ChargeBee").
+    pub fn apply_replacements(&self, text: &str) -> String {
+        let mut rules: Vec<(Vec<String>, &str)> = Vec::new();
+        for e in &self.entries {
+            for m in &e.mishears {
+                let words: Vec<String> = word_spans(m).iter().map(|&(a, b)| m[a..b].to_lowercase()).collect();
+                if words.is_empty() || words.join(" ") == e.correct.to_lowercase() {
+                    continue;
+                }
+                rules.push((words, e.correct.as_str()));
+            }
+        }
+        if rules.is_empty() {
+            return text.to_string();
+        }
+        rules.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+        let spans = word_spans(text);
+        let lower: Vec<String> = spans.iter().map(|&(a, b)| text[a..b].to_lowercase()).collect();
+        let mut out = String::with_capacity(text.len());
+        let mut pos = 0;
+        let mut i = 0;
+        while i < spans.len() {
+            let hit = rules.iter().find(|(w, _)| {
+                i + w.len() <= spans.len()
+                    && lower[i..i + w.len()] == w[..]
+                    && (i..i + w.len() - 1).all(|k| {
+                        text[spans[k].1..spans[k + 1].0].chars().all(char::is_whitespace)
+                    })
+            });
+            match hit {
+                Some((w, correct)) => {
+                    let (start, _) = spans[i];
+                    let (_, end) = spans[i + w.len() - 1];
+                    out.push_str(&text[pos..start]);
+                    out.push_str(&match_case(&text[start..end], correct));
+                    pos = end;
+                    i += w.len();
+                }
+                None => i += 1,
+            }
+        }
+        out.push_str(&text[pos..]);
+        out
+    }
+
+    /// Spellings plus mishears worth biasing the recognizer toward: correct
+    /// spellings only (a mishear in the context list would reinforce the error).
+    pub fn bias_words(&self) -> Vec<String> {
+        self.entries.iter().map(|e| e.correct.clone()).collect()
+    }
+
     /// Select the entries relevant to `utterance` — those whose spelling or a known
     /// mishear is edit-close to a spoken token (or adjacent token pair, to catch
     /// split words like "charge bee" → "ChargeBee") — capped to `max`.
@@ -118,6 +173,43 @@ impl DictionaryStore {
             }
         }
         out
+    }
+}
+
+/// Byte ranges of the words (alphanumeric runs, with inner apostrophes) in `s`.
+fn word_spans(s: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    for (idx, &(b, c)) in chars.iter().enumerate() {
+        let inner_apos = (c == '\'' || c == '\u{2019}')
+            && start.is_some()
+            && chars.get(idx + 1).is_some_and(|&(_, n)| n.is_alphanumeric());
+        if c.is_alphanumeric() || inner_apos {
+            start.get_or_insert(b);
+        } else if let Some(a) = start.take() {
+            spans.push((a, b));
+        }
+    }
+    if let Some(a) = start {
+        spans.push((a, s.len()));
+    }
+    spans
+}
+
+fn match_case(src: &str, correct: &str) -> String {
+    let has_inner_upper = correct.chars().skip(1).any(char::is_uppercase);
+    let letters: Vec<char> = src.chars().filter(|c| c.is_alphabetic()).collect();
+    if has_inner_upper || correct.chars().next().is_some_and(char::is_uppercase) {
+        return correct.to_string();
+    }
+    if letters.len() > 1 && letters.iter().all(|c| c.is_uppercase()) {
+        correct.to_uppercase()
+    } else if letters.first().is_some_and(|c| c.is_uppercase()) {
+        let mut cs = correct.chars();
+        cs.next().map(|f| f.to_uppercase().chain(cs).collect()).unwrap_or_default()
+    } else {
+        correct.to_string()
     }
 }
 
@@ -163,6 +255,27 @@ mod tests {
     fn prefilter_ignores_unrelated_utterance() {
         let v = store().prefilter("the weather is nice today", 15);
         assert!(v.is_empty());
+    }
+
+    #[test]
+    fn replacements_are_whole_word_and_case_aware() {
+        let mut s = DictionaryStore::default();
+        s.add("Manvi", vec!["Monvi".into()], DictSource::Manual);
+        s.add("ChargeBee", vec!["charge bee".into()], DictSource::Manual);
+        s.add("water", vec!["wooder".into()], DictSource::Manual);
+        assert_eq!(s.apply_replacements("tell monvi, ok"), "tell Manvi, ok");
+        assert_eq!(s.apply_replacements("renew Charge  Bee now"), "renew ChargeBee now");
+        assert_eq!(s.apply_replacements("Wooder is wet"), "Water is wet");
+        assert_eq!(s.apply_replacements("WOODER"), "WATER");
+        assert_eq!(s.apply_replacements("monvis car"), "monvis car");
+        assert_eq!(s.apply_replacements("nothing here"), "nothing here");
+    }
+
+    #[test]
+    fn legacy_json_without_new_source_still_loads() {
+        let j = r#"{"entries":[{"correct":"A","mishears":["b"]}]}"#;
+        let s: DictionaryStore = serde_json::from_str(j).unwrap();
+        assert_eq!(s.entries[0].source, DictSource::Manual);
     }
 
     #[test]

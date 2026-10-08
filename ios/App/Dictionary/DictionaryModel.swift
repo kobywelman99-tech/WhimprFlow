@@ -55,4 +55,10 @@ final class DictionaryModel {
     }
 
     var words: [String] { store.words() }
+
+    /// Known mishears rewritten to their right spelling (whole words only).
+    func applyReplacements(to text: String) -> String {
+        store.applyReplacements(text: text)
+    }
+
 }

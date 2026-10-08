@@ -53,6 +53,11 @@ pub struct Settings {
     /// overrides that guess. See `crate::cleanup::FormatMode`.
     #[serde(default)]
     pub format_mode: FormatMode,
+    /// Re-read each cleaned dictation as its recipient would and repair words that
+    /// don't make sense, using what was heard (see `crate::review`). One extra
+    /// cloud call per dictation; skipped for Raw and for the on-device model.
+    #[serde(default = "default_true")]
+    pub review_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -71,6 +76,7 @@ impl Default for Settings {
             overlay_pos: None,
             style_learning_enabled: true,
             format_mode: FormatMode::default(),
+            review_enabled: true,
         }
     }
 }

@@ -95,7 +95,13 @@ pub trait CleanupProvider: Send + Sync {
     /// Produce cleaned text for `raw` under `ctx`. Synchronous form; a streaming
     /// variant is layered on top by the runtime. `None` level should be handled by
     /// the caller (bypass) and never reach a provider.
-    fn cleanup(&self, raw: &str, ctx: &CleanupContext) -> anyhow::Result<String>;
+    fn cleanup(&self, raw: &str, ctx: &CleanupContext) -> anyhow::Result<String> {
+        self.complete(&build_messages(raw, ctx))
+    }
+
+    /// Send an arbitrary ordered message list (system first) and return the reply.
+    /// [`cleanup`] is this with the cleanup prompt; the sense check uses it with its own.
+    fn complete(&self, messages: &[CleanupMsg]) -> anyhow::Result<String>;
 }
 
 /// One chat turn in a cleanup request. `role` is "system", "user", or "assistant".

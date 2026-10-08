@@ -6,6 +6,7 @@ import { Sidebar, type Page } from "./Sidebar";
 import { Home } from "./Home";
 import { Insights } from "./Insights";
 import { DictionaryPane } from "./DictionaryPane";
+import { CalibrationPane } from "./CalibrationPane";
 import { SettingsPane } from "./SettingsPane";
 import { StylePane } from "./StylePane";
 import { Help } from "./Help";
@@ -288,6 +289,7 @@ export function App() {
             {page === "home" && <Home />}
             {page === "insights" && <Insights />}
             {page === "dictionary" && <DictionaryPane onError={reportError} />}
+            {page === "calibration" && <CalibrationPane onError={reportError} />}
             {page === "style" && (
               <StylePane settings={settings} onChange={update} onError={reportError} />
             )}

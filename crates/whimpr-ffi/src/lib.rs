@@ -166,6 +166,62 @@ pub fn finish_cleanup(model_output: String, fallback: String, level: Level) -> C
     }
 }
 
+// MARK: Sense check
+
+/// A word or phrase the sense check changed.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReviewChange {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReviewOutcome {
+    /// What to insert: the fixed message, or the draft untouched.
+    pub text: String,
+    pub changed: bool,
+    pub changes: Vec<ReviewChange>,
+    /// Why a proposed fix was thrown away, for logs.
+    pub rejection: Option<String>,
+}
+
+/// The request for the last read before a message is inserted: does it make
+/// sense in its conversation? `heard` is what the recogniser produced, `draft`
+/// the message about to be inserted, `context` the text already in the box.
+/// `skip_model` is set when the message is too short to be worth checking.
+#[uniffi::export]
+pub fn prepare_review(heard: String, draft: String, context: Option<String>, vocab: Vec<Vocab>) -> CleanupRequest {
+    if !whimpr_core::review::worth_checking(&draft) {
+        return CleanupRequest { skip_model: true, system: String::new(), messages: Vec::new(), fallback: draft };
+    }
+    let vocab: Vec<VocabEntry> = vocab
+        .into_iter()
+        .map(|v| VocabEntry { correct: v.correct, mishears: v.mishears })
+        .collect();
+    let mut system = String::new();
+    let mut messages = Vec::new();
+    for m in whimpr_core::review::build_messages(&heard, &draft, context.as_deref(), &vocab) {
+        if m.role == "system" {
+            system = m.content;
+        } else {
+            messages.push(ChatMessage { role: m.role.to_string(), content: m.content });
+        }
+    }
+    CleanupRequest { skip_model: false, system, messages, fallback: draft }
+}
+
+/// Reads the model's answer. Anything doubtful keeps the draft as it was.
+#[uniffi::export]
+pub fn finish_review(model_output: String, draft: String, heard: String) -> ReviewOutcome {
+    let o = whimpr_core::review::finish(&model_output, &draft, &heard);
+    ReviewOutcome {
+        text: o.text,
+        changed: o.changed,
+        changes: o.changes.into_iter().map(|c| ReviewChange { from: c.from, to: c.to }).collect(),
+        rejection: o.rejected,
+    }
+}
+
 // MARK: Dictionary
 
 /// Entries passed to the cleanup prompt per dictation; same cap as desktop.
@@ -258,7 +314,14 @@ impl UserDictionary {
 
     /// Every correct spelling, for the speech recogniser's vocabulary hints.
     pub fn words(&self) -> Vec<String> {
-        self.lock().entries.iter().map(|e| e.correct.clone()).collect()
+        self.lock().bias_words()
+    }
+
+    /// Rewrites known mishears in `text` to their correct spelling (whole words
+    /// only). Run on the raw transcript before cleanup, so it applies at every
+    /// level including Off.
+    pub fn apply_replacements(&self, text: String) -> String {
+        self.lock().apply_replacements(&text)
     }
 }
 
@@ -270,6 +333,157 @@ impl UserDictionary {
 
     fn save(&self, store: &DictionaryStore) -> Result<(), DictionaryError> {
         store.save(&self.path).map_err(|e| DictionaryError::Io { message: e.to_string() })
+    }
+}
+
+// MARK: Calibration and the voice brain
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CalibrationPrompt {
+    pub id: u32,
+    /// The tradition it draws on: prose, verse, oratory, phonetic, ...
+    pub tag: String,
+    pub text: String,
+}
+
+/// One spoken attempt: the prompt text and what the recogniser returned.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CalibrationAttempt {
+    pub expected: String,
+    pub heard: String,
+}
+
+/// `count` prompts spanning every style; `seed` varies which lines come up.
+#[uniffi::export]
+pub fn calibration_prompts(count: u32, seed: u64) -> Vec<CalibrationPrompt> {
+    whimpr_core::calibration::prompts(count as usize, seed)
+        .into_iter()
+        .map(|p| CalibrationPrompt { id: p.id, tag: p.tag.to_string(), text: p.text.to_string() })
+        .collect()
+}
+
+/// A sound the user tends to say differently.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct BrainPattern {
+    /// The sound meant, e.g. "th (think)".
+    pub meant: String,
+    /// What it often comes out as, e.g. "f (fan)".
+    pub heard: String,
+    /// 0–1: how often.
+    pub rate: f32,
+    pub count: u32,
+    pub opportunities: u32,
+}
+
+/// What the Voice screen shows.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct BrainOverview {
+    pub observations: u32,
+    /// Word pairs repeated enough to be applied automatically.
+    pub learned_words: u32,
+    pub patterns: Vec<BrainPattern>,
+}
+
+/// The recogniser's candidates, after the brain has weighed them.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct BrainChoice {
+    pub text: String,
+    /// An alternative replaced the recogniser's first choice.
+    pub switched: bool,
+}
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum BrainError {
+    #[error("Couldn't save what was learned: {message}")]
+    Io { message: String },
+}
+
+/// What WhimprFlow has learned about how this user sounds: whimpr-core's `Brain`,
+/// saved to `path` after every change.
+#[derive(uniffi::Object)]
+pub struct VoiceBrain {
+    path: PathBuf,
+    brain: Mutex<whimpr_core::brain::Brain>,
+}
+
+#[uniffi::export]
+impl VoiceBrain {
+    /// Opens the brain at `path`; a missing or unreadable file is empty.
+    #[uniffi::constructor]
+    pub fn open(path: String) -> Arc<Self> {
+        let path = PathBuf::from(path);
+        let brain = whimpr_core::brain::Brain::load(&path);
+        // Parse the pronunciation dictionary now, off the dictation path.
+        std::thread::spawn(|| {
+            whimpr_core::brain::lexicon::get();
+        });
+        Arc::new(Self { path, brain: Mutex::new(brain) })
+    }
+
+    /// Learns from what was meant against what the recogniser heard, then saves.
+    pub fn observe(&self, meant: String, heard: String) -> Result<(), BrainError> {
+        self.observe_all(vec![CalibrationAttempt { expected: meant, heard }])
+    }
+
+    /// Learns from several attempts at once and saves once.
+    pub fn observe_all(&self, attempts: Vec<CalibrationAttempt>) -> Result<(), BrainError> {
+        let mut brain = self.lock();
+        for a in &attempts {
+            brain.observe(&a.expected, &a.heard);
+        }
+        self.save(&brain)
+    }
+
+    /// Picks among the recogniser's candidate transcriptions, best first.
+    pub fn rescore(&self, candidates: Vec<String>) -> BrainChoice {
+        let r = self.lock().rescore(&candidates);
+        BrainChoice { text: r.text, switched: r.switched }
+    }
+
+    /// Rewrites word pairs the brain has learned (whole words only).
+    pub fn correct(&self, text: String) -> String {
+        self.lock().correct(&text)
+    }
+
+    /// Spellings the recogniser should lean toward.
+    pub fn bias_words(&self, limit: u32) -> Vec<String> {
+        self.lock().bias_words(limit as usize)
+    }
+
+    pub fn overview(&self) -> BrainOverview {
+        let s = self.lock().summary();
+        BrainOverview {
+            observations: s.observations,
+            learned_words: s.learned_words,
+            patterns: s
+                .patterns
+                .into_iter()
+                .map(|p| BrainPattern {
+                    meant: p.meant,
+                    heard: p.heard,
+                    rate: p.rate,
+                    count: p.count,
+                    opportunities: p.opportunities,
+                })
+                .collect(),
+        }
+    }
+
+    /// Forgets everything and saves.
+    pub fn reset(&self) -> Result<(), BrainError> {
+        let mut brain = self.lock();
+        brain.reset();
+        self.save(&brain)
+    }
+}
+
+impl VoiceBrain {
+    fn lock(&self) -> MutexGuard<'_, whimpr_core::brain::Brain> {
+        self.brain.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn save(&self, brain: &whimpr_core::brain::Brain) -> Result<(), BrainError> {
+        brain.save(&self.path).map_err(|e| BrainError::Io { message: e.to_string() })
     }
 }
 
@@ -386,6 +600,68 @@ impl StyleProfile {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sense_check_round_trip() {
+        let heard = "sure I'll send you the rapport in an hour";
+        let draft = "Sure, I'll send you the rapport in an hour.";
+        let req = prepare_review(heard.into(), draft.into(), Some("Can you send me the report?".into()), vec![]);
+        assert!(!req.skip_model);
+        assert!(req.system.contains("last check"));
+        let last = req.messages.last().unwrap();
+        assert!(last.content.contains("Can you send me the report?") && last.content.contains(draft));
+
+        let out = finish_review("<fixed>Sure, I'll send you the report in an hour.</fixed>".into(), draft.into(), heard.into());
+        assert!(out.changed);
+        assert_eq!(out.changes, vec![ReviewChange { from: "rapport".into(), to: "report".into() }]);
+
+        let kept = finish_review("<ok/>".into(), draft.into(), heard.into());
+        assert_eq!((kept.text.as_str(), kept.changed), (draft, false));
+    }
+
+    #[test]
+    fn sense_check_skips_tiny_messages() {
+        let req = prepare_review("ok thanks".into(), "Ok thanks".into(), None, vec![]);
+        assert!(req.skip_model);
+        assert_eq!(req.fallback, "Ok thanks");
+    }
+
+    #[test]
+    fn the_brain_learns_saves_and_reloads() {
+        let dir = std::env::temp_dir().join(format!("whimpr-brain-{}", std::process::id()));
+        let path = dir.join("brain.json").to_string_lossy().to_string();
+        let brain = VoiceBrain::open(path.clone());
+        assert_eq!(brain.overview().observations, 0);
+
+        let attempts = vec![
+            CalibrationAttempt { expected: "the water is cold".into(), heard: "the wooder is cold".into() },
+            CalibrationAttempt { expected: "water bottle".into(), heard: "wooder bottle".into() },
+        ];
+        brain.observe_all(attempts).unwrap();
+        assert_eq!(brain.overview().observations, 2);
+        assert_eq!(brain.overview().learned_words, 1);
+        assert_eq!(brain.correct("Wooder please".into()), "Water please");
+
+        let reopened = VoiceBrain::open(path);
+        assert_eq!(reopened.correct("wooder".into()), "water");
+        assert_eq!(reopened.bias_words(5), vec!["water".to_string()]);
+        reopened.reset().unwrap();
+        assert_eq!(VoiceBrain::open(dir.join("brain.json").to_string_lossy().to_string()).overview().observations, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rescore_keeps_the_first_choice_for_a_new_brain() {
+        let brain = VoiceBrain::open(std::env::temp_dir().join("whimpr-none/brain.json").to_string_lossy().to_string());
+        let r = brain.rescore(vec!["he fought it".into(), "he thought it".into()]);
+        assert_eq!(r, BrainChoice { text: "he fought it".into(), switched: false });
+    }
+
+    #[test]
+    fn calibration_prompts_vary_by_seed() {
+        assert_eq!(calibration_prompts(8, 1).len(), 8);
+        assert_ne!(calibration_prompts(8, 1), calibration_prompts(8, 2));
+    }
+
     use super::*;
 
     /// A fresh file path per call. Tests run in parallel, and a clock reading

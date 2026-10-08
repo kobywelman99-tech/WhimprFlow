@@ -6,6 +6,7 @@ export type Page =
   | "home"
   | "insights"
   | "dictionary"
+  | "calibration"
   | "snippets"
   | "style"
   | "transforms"
@@ -19,6 +20,7 @@ const MAIN: NavDef[] = [
   { key: "home", label: "Home", icon: "home" },
   { key: "insights", label: "Insights", icon: "insights" },
   { key: "dictionary", label: "Dictionary", icon: "dictionary" },
+  { key: "calibration", label: "Your voice", icon: "style" },
   { key: "snippets", label: "Snippets", icon: "snippets" },
   { key: "style", label: "Style", icon: "style" },
   { key: "transforms", label: "Transforms", icon: "transforms" },

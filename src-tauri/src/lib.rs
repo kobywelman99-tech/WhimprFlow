@@ -209,6 +209,100 @@ fn remove_dictionary_entry(correct: String) {
     hotkey::dictionary_remove(&correct);
 }
 
+// ── Voice calibration ───────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct CalibrationPromptDto {
+    id: u32,
+    tag: String,
+    text: String,
+}
+
+#[derive(serde::Deserialize)]
+struct CalibrationAttemptDto {
+    expected: String,
+    heard: String,
+}
+
+#[derive(serde::Serialize)]
+struct BrainPatternDto {
+    meant: String,
+    heard: String,
+    rate: f32,
+    count: u32,
+    opportunities: u32,
+}
+
+#[derive(serde::Serialize)]
+struct BrainOverviewDto {
+    observations: u32,
+    learned_words: u32,
+    patterns: Vec<BrainPatternDto>,
+}
+
+fn brain_overview_dto() -> BrainOverviewDto {
+    let s = hotkey::brain_summary();
+    BrainOverviewDto {
+        observations: s.observations,
+        learned_words: s.learned_words,
+        patterns: s
+            .patterns
+            .into_iter()
+            .map(|p| BrainPatternDto {
+                meant: p.meant,
+                heard: p.heard,
+                rate: p.rate,
+                count: p.count,
+                opportunities: p.opportunities,
+            })
+            .collect(),
+    }
+}
+
+/// Lines to read aloud, spanning every style; `seed` varies which come up.
+#[tauri::command]
+fn calibration_prompts(count: u32, seed: u64) -> Vec<CalibrationPromptDto> {
+    whimpr_core::calibration::prompts(count as usize, seed)
+        .into_iter()
+        .map(|p| CalibrationPromptDto { id: p.id, tag: p.tag.to_string(), text: p.text.to_string() })
+        .collect()
+}
+
+#[tauri::command]
+fn calibration_record_start() -> Result<(), String> {
+    hotkey::calibration_record_start()
+}
+
+/// Stop recording and return what the recogniser heard. Runs off the main
+/// thread: transcription takes a moment.
+#[tauri::command]
+async fn calibration_record_stop() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(hotkey::calibration_record_stop)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Teach the brain from a calibration session: what each line was meant to be
+/// against what the recogniser heard.
+#[tauri::command]
+fn calibration_learn(attempts: Vec<CalibrationAttemptDto>) -> BrainOverviewDto {
+    hotkey::brain_learn(attempts.into_iter().map(|a| (a.expected, a.heard)).collect());
+    brain_overview_dto()
+}
+
+/// What the brain has learned about how the user sounds.
+#[tauri::command]
+fn get_brain() -> BrainOverviewDto {
+    brain_overview_dto()
+}
+
+/// Forget everything the brain learned.
+#[tauri::command]
+fn reset_brain() -> BrainOverviewDto {
+    hotkey::brain_reset();
+    brain_overview_dto()
+}
+
 /// The learned style profiles (Email/General/Essay-Report) for the Hub's
 /// Style page, keyed by mode.
 #[tauri::command]
@@ -377,6 +471,12 @@ pub fn run() {
             get_dictionary,
             add_dictionary_entry,
             remove_dictionary_entry,
+            calibration_prompts,
+            calibration_record_start,
+            calibration_record_stop,
+            calibration_learn,
+            get_brain,
+            reset_brain,
             get_style_summaries,
             reset_style_profile,
             get_status,

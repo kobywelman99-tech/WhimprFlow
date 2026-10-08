@@ -24,6 +24,8 @@ export interface Settings {
   // already happens.
   style_learning_enabled: boolean;
   format_mode: FormatMode;
+  // Re-read each dictation in context and fix words that don't make sense.
+  review_enabled: boolean;
 }
 
 // Mirrors `permissions::Grant` in src-tauri. A bare boolean couldn't tell
@@ -94,6 +96,7 @@ export const DEFAULT_SETTINGS: Settings = {
   sound_on_start: true,
   style_learning_enabled: true,
   format_mode: "auto",
+  review_enabled: true,
 };
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -265,6 +268,67 @@ export async function removeDictionaryEntry(correct: string): Promise<void> {
   } catch (e) {
     if (isTauri()) throw e;
   }
+}
+
+// ── Voice calibration ────────────────────────────────────────────────────────
+// Mirrors the calibration commands in src-tauri/src/lib.rs.
+export interface CalibrationPrompt {
+  id: number;
+  tag: string;
+  text: string;
+}
+
+// A sound the user tends to say differently, e.g. meant "th (think)" → heard "f (fan)".
+export interface BrainPattern {
+  meant: string;
+  heard: string;
+  rate: number;
+  count: number;
+  opportunities: number;
+}
+
+export interface BrainOverview {
+  observations: number;
+  learned_words: number;
+  patterns: BrainPattern[];
+}
+
+export const EMPTY_BRAIN: BrainOverview = { observations: 0, learned_words: 0, patterns: [] };
+
+export async function getCalibrationPrompts(count: number, seed: number): Promise<CalibrationPrompt[]> {
+  try {
+    return await invoke<CalibrationPrompt[]>("calibration_prompts", { count, seed });
+  } catch {
+    return [];
+  }
+}
+
+export async function calibrationRecordStart(): Promise<void> {
+  await invoke<void>("calibration_record_start");
+}
+
+/** Stops recording; resolves to what the recogniser heard. */
+export async function calibrationRecordStop(): Promise<string> {
+  return await invoke<string>("calibration_record_stop");
+}
+
+/** Teach the brain from a session; resolves to what it now knows. */
+export async function learnFromCalibration(
+  attempts: { expected: string; heard: string }[],
+): Promise<BrainOverview> {
+  return await invoke<BrainOverview>("calibration_learn", { attempts });
+}
+
+export async function getBrain(): Promise<BrainOverview> {
+  try {
+    return await invoke<BrainOverview>("get_brain");
+  } catch {
+    return EMPTY_BRAIN;
+  }
+}
+
+export async function resetBrain(): Promise<BrainOverview> {
+  return await invoke<BrainOverview>("reset_brain");
 }
 
 // ── Style ──────────────────────────────────────────────────────────────────

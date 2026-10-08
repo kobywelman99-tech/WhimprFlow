@@ -16,6 +16,7 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 cleanupSection
+                reviewSection
                 keySection
                 testSection
             }
@@ -43,6 +44,17 @@ struct SettingsView: View {
             Text("Cleanup")
         } footer: {
             Text(levelDescription)
+        }
+    }
+
+    private var reviewSection: some View {
+        Section {
+            Toggle("Check it makes sense", isOn: Binding(get: { settings.reviewEnabled }, set: { settings.reviewEnabled = $0 }))
+                .disabled(!settings.enabled)
+        } header: {
+            Text("Sense check")
+        } footer: {
+            Text("Before a dictation is inserted, Claude re-reads it in the conversation it's going into and fixes any word that doesn't fit, using what you actually said. It only changes a few words and never rewrites. The text before your cursor is sent to Anthropic for this. Skipped at the Raw level.")
         }
     }
 

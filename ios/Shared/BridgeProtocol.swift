@@ -73,12 +73,16 @@ struct BridgeMessage: Codable, Equatable, Sendable {
     var cleanupLevel: DictationLevel?
     /// `audioLevel`: how loud the mic is, 0…1.
     var value: Double?
+    /// `start`: the text already in the box before the cursor, so the app can check
+    /// the dictation makes sense in its conversation. Stays on this phone's loopback.
+    var context: String?
 
-    init(_ kind: Kind, text: String? = nil, cleanupLevel: DictationLevel? = nil, value: Double? = nil) {
+    init(_ kind: Kind, text: String? = nil, cleanupLevel: DictationLevel? = nil, value: Double? = nil, context: String? = nil) {
         self.kind = kind
         self.text = text
         self.cleanupLevel = cleanupLevel
         self.value = value
+        self.context = context
     }
 }
 

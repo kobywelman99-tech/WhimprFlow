@@ -353,6 +353,13 @@ final class KeyboardViewController: UIInputViewController {
     private let notice = UINotificationFeedbackGenerator()
     private let selection = UISelectionFeedbackGenerator()
 
+    /// What's already written in the box before the cursor, so the app can check
+    /// the dictation fits it. Empty fields and fields the keyboard can't read give nil.
+    private func conversationSoFar() -> String? {
+        let before = textDocumentProxy.documentContextBeforeInput?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (before?.isEmpty ?? true) ? nil : before
+    }
+
     func micTapped() {
         guard fullAccess() else {
             micBar.setStatus("Turn on Allow Full Access in Settings ▸ General ▸ Keyboard ▸ Keyboards ▸ WhimprFlow")
@@ -366,7 +373,7 @@ final class KeyboardViewController: UIInputViewController {
             // A new dictation replaces the one waiting (it's in History).
             pendingText = nil
             updateChip()
-            send(BridgeMessage(.start, cleanupLevel: pillLevel))
+            send(BridgeMessage(.start, cleanupLevel: pillLevel, context: conversationSoFar()))
             micBar.setStatus("Starting…")
         case .recording:
             impact.impactOccurred()
@@ -407,7 +414,7 @@ final class KeyboardViewController: UIInputViewController {
             if micPending {
                 micPending = false
                 impact.impactOccurred()
-                send(BridgeMessage(.start, cleanupLevel: pillLevel))
+                send(BridgeMessage(.start, cleanupLevel: pillLevel, context: conversationSoFar()))
                 micBar.setStatus("Starting…")
             } else {
                 micBar.setStatus("Flow is on")

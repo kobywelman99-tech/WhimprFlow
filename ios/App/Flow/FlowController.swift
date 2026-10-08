@@ -114,6 +114,7 @@ final class FlowController {
                 do {
                     try await dictation.beginUtterance(
                         level: message.cleanupLevel.map(Level.init),
+                        context: message.context,
                         onText: { [weak self] text in
                             self?.sendToActive(BridgeMessage(.partial, text: text))
                         },

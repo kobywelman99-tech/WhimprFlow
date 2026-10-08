@@ -10,10 +10,13 @@
 //! settings, and storage modules.
 
 pub mod asr;
+pub mod brain;
+pub mod calibration;
 pub mod cleanup;
 pub mod credentials;
 pub mod diagnostics;
 pub mod dictionary;
+pub mod review;
 pub mod settings;
 pub mod state;
 pub mod stats;

@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use whimpr_core::cleanup::{build_messages, CleanupContext, CleanupProvider, ProviderId};
+use whimpr_core::cleanup::{CleanupMsg, CleanupProvider, ProviderId};
 
 /// Default OpenAI Chat Completions endpoint.
 const OPENAI_DEFAULT_URL: &str = "https://api.openai.com/v1/chat/completions";
@@ -56,16 +56,15 @@ impl CleanupProvider for OpenAiProvider {
         ProviderId::OpenAi
     }
 
-    fn cleanup(&self, raw: &str, ctx: &CleanupContext) -> anyhow::Result<String> {
-        // System prompt + few-shot demonstration turns + the real transcript.
-        let messages: Vec<serde_json::Value> = build_messages(raw, ctx)
-            .into_iter()
+    fn complete(&self, messages: &[CleanupMsg]) -> anyhow::Result<String> {
+        let messages: Vec<serde_json::Value> = messages
+            .iter()
             .map(|m| serde_json::json!({ "role": m.role, "content": m.content }))
             .collect();
         let body = serde_json::json!({
             "model": self.model,
             "temperature": 0.2,
-            "max_tokens": 512,
+            "max_tokens": 1024,
             "messages": messages,
         });
 
@@ -122,21 +121,21 @@ impl CleanupProvider for AnthropicProvider {
         ProviderId::Anthropic
     }
 
-    fn cleanup(&self, raw: &str, ctx: &CleanupContext) -> anyhow::Result<String> {
-        // Anthropic takes the system prompt top-level; the few-shot turns and the
-        // real transcript go in `messages` as user/assistant turns.
+    fn complete(&self, msgs: &[CleanupMsg]) -> anyhow::Result<String> {
+        // Anthropic takes the system prompt top-level; the other turns go in
+        // `messages` as user/assistant turns.
         let mut system = String::new();
         let mut messages: Vec<serde_json::Value> = Vec::new();
-        for m in build_messages(raw, ctx) {
+        for m in msgs {
             if m.role == "system" {
-                system = m.content;
+                system = m.content.clone();
             } else {
                 messages.push(serde_json::json!({ "role": m.role, "content": m.content }));
             }
         }
         let body = serde_json::json!({
             "model": self.model,
-            "max_tokens": 512,
+            "max_tokens": 1024,
             "temperature": 0.2,
             "system": system,
             "messages": messages,
