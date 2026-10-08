@@ -362,6 +362,50 @@
       "expected_cleaned": "Can you please remind me to call the pharmacy before they close.",
       "approved": false,
       "note": "say it quickly, as you would when rushed"
+    },
+    {
+      "id": "31-very-short-no",
+      "wav": "31-very-short-no.wav",
+      "category": "very-short",
+      "say": "no",
+      "note": "one short word, under half a second; start right away",
+      "expected_raw": "no",
+      "expected_cleaned": "No.",
+      "approved": false,
+      "max_wer": 0.0
+    },
+    {
+      "id": "32-very-short-hi",
+      "wav": "32-very-short-hi.wav",
+      "category": "very-short",
+      "say": "hi",
+      "note": "one short word, under half a second; start right away",
+      "expected_raw": "hi",
+      "expected_cleaned": "Hi.",
+      "approved": false,
+      "max_wer": 0.0
+    },
+    {
+      "id": "33-very-short-bye",
+      "wav": "33-very-short-bye.wav",
+      "category": "very-short",
+      "say": "bye",
+      "note": "one short word, under half a second; start right away",
+      "expected_raw": "bye",
+      "expected_cleaned": "Bye.",
+      "approved": false,
+      "max_wer": 0.0
+    },
+    {
+      "id": "34-very-short-you",
+      "wav": "34-very-short-you.wav",
+      "category": "very-short",
+      "say": "you",
+      "note": "one short word, under half a second; start right away",
+      "expected_raw": "you",
+      "expected_cleaned": "You.",
+      "approved": false,
+      "max_wer": 0.0
     }
   ]
 }

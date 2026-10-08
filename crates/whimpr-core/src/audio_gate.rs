@@ -22,14 +22,17 @@ pub trait SpeechDetector {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GatePolicy {
-    /// Speech starts when a frame goes above this probability.
+    /// Speech starts when a frame goes above this probability. 0.3 is `transcribe-rs`'s
+    /// recommendation, and it matters: quiet one-word dictations ("bye", "you", "no") sit at
+    /// 0.3-0.5 and never clear Silero's usual 0.5, while the non-speech we measured (white
+    /// noise, clicks, bursts) peaks near 0.13. Losing a word is worse than letting noise
+    /// through, because the transcript checks catch the latter.
     pub threshold: f32,
     /// Once speech has started, it continues while frames stay above this (lower)
-    /// probability, so soft word endings aren't clipped (Silero's recommended hysteresis).
+    /// probability, so soft word endings aren't clipped.
     pub continue_threshold: f32,
-    /// Speech shorter than this many frames in total is treated as a blip (a click, a
-    /// cough), not an utterance. 7 frames is about 200 ms: long enough to skip clicks,
-    /// short enough to keep a quick "no".
+    /// Speech shorter than this many frames in total is treated as a blip (a click), not an
+    /// utterance. 4 frames is 120 ms: it removes the shortest transients and keeps "no".
     pub min_speech_frames: usize,
     /// Speech separated by less than this many frames is one utterance (about 600 ms).
     pub merge_gap_frames: usize,
@@ -39,7 +42,7 @@ pub struct GatePolicy {
 
 impl Default for GatePolicy {
     fn default() -> Self {
-        Self { threshold: 0.5, continue_threshold: 0.35, min_speech_frames: 7, merge_gap_frames: 20, pad_frames: 5 }
+        Self { threshold: 0.3, continue_threshold: 0.2, min_speech_frames: 4, merge_gap_frames: 20, pad_frames: 5 }
     }
 }
 
@@ -124,15 +127,14 @@ pub fn gate(pcm: &[f32], detector: Option<&mut dyn SpeechDetector>, policy: &Gat
     Gated::Audio { pcm: audio, speech_ms }
 }
 
-/// What whisper tends to write for audio that has no speech in it.
+/// What whisper tends to write for audio that has no speech in it. Single words someone
+/// might really dictate ("you", "bye") are deliberately not here: a quick one-word
+/// dictation has about as little speech as the silence this guards against.
 const HALLUCINATIONS: &[&str] = &[
     "thank you",
     "thank you very much",
     "thanks for watching",
     "thank you for watching",
-    "you",
-    "bye",
-    "bye bye",
     "[blank_audio]",
     "[silence]",
     "(silence)",
@@ -213,14 +215,45 @@ mod tests {
 
     #[test]
     fn a_fading_word_ending_stays_in_but_a_faint_sound_alone_never_starts_speech() {
-        // Strong speech that trails off at 0.4: still speech under hysteresis.
-        let fading = cat(&[frames(0.0, 10), frames(0.9, 12), frames(0.4, 8), frames(0.0, 10)]);
+        // Strong speech that trails off at 0.25: still speech under hysteresis.
+        let fading = cat(&[frames(0.0, 10), frames(0.9, 12), frames(0.25, 8), frames(0.0, 10)]);
         let Plan::Keep { speech_ms, .. } = plan(&fading, samples(40), &GatePolicy::default()) else { panic!("skipped") };
         assert_eq!(speech_ms, 600, "12 strong frames plus the 8 fading ones");
 
-        // The same 0.4 level on its own never crosses the start threshold.
-        let faint = frames(0.4, 60);
+        // The same 0.25 level on its own never crosses the start threshold.
+        let faint = frames(0.25, 60);
         assert_eq!(plan(&faint, samples(60), &GatePolicy::default()), Plan::Skip(SkipReason::NoSpeech));
+    }
+
+    // Silero v4's probabilities, measured per 30 ms frame with its memory reset for each
+    // clip, for one word read by a macOS voice. Quiet words hover at 0.3-0.5 and only just
+    // cross 0.5, which is why the start threshold matters.
+    const BYE: [f32; 19] = [0.189, 0.115, 0.061, 0.070, 0.219, 0.264, 0.329, 0.399, 0.435, 0.435, 0.518, 0.480, 0.048, 0.004, 0.001, 0.0, 0.0, 0.0, 0.0];
+    const YOU: [f32; 17] = [0.204, 0.211, 0.203, 0.332, 0.457, 0.524, 0.471, 0.513, 0.390, 0.059, 0.004, 0.001, 0.001, 0.0, 0.0, 0.0, 0.0];
+    const NO: [f32; 20] = [0.218, 0.196, 0.253, 0.287, 0.261, 0.237, 0.269, 0.317, 0.370, 0.421, 0.440, 0.354, 0.111, 0.013, 0.003, 0.001, 0.0, 0.0, 0.0, 0.0];
+    const HI: [f32; 20] = [0.031, 0.036, 0.232, 0.459, 0.532, 0.678, 0.676, 0.682, 0.686, 0.691, 0.684, 0.670, 0.685, 0.200, 0.009, 0.004, 0.001, 0.0, 0.0, 0.0];
+
+    #[test]
+    fn a_quick_quiet_one_word_dictation_is_kept() {
+        for (word, trace) in [("bye", &BYE[..]), ("you", &YOU[..]), ("no", &NO[..]), ("hi", &HI[..])] {
+            let verdict = plan(trace, samples(trace.len()), &GatePolicy::default());
+            assert!(matches!(verdict, Plan::Keep { .. }), "\"{word}\" was skipped: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn noise_level_probabilities_stay_skipped() {
+        // White noise, clicks and bursts peaked at 0.13 when measured; none came close to a word.
+        let faint: Vec<f32> = (0..60).map(|i| 0.04 + 0.09 * ((i * 7) % 10) as f32 / 10.0).collect();
+        assert!(faint.iter().all(|&p| p <= 0.13));
+        assert_eq!(plan(&faint, samples(60), &GatePolicy::default()), Plan::Skip(SkipReason::NoSpeech));
+    }
+
+    #[test]
+    fn a_lone_you_or_bye_is_not_mistaken_for_a_hallucination() {
+        for word in ["You", "you.", "Bye", "Bye bye."] {
+            assert!(!is_hallucination(word, 200), "{word}");
+        }
     }
 
     #[test]
@@ -302,7 +335,7 @@ mod tests {
 
     #[test]
     fn stock_non_speech_phrases_are_dropped_only_when_there_was_barely_any_speech() {
-        for text in ["Thank you.", "thank you", "You", "[BLANK_AUDIO]", "Thanks for watching!", "(music)"] {
+        for text in ["Thank you.", "thank you", "[BLANK_AUDIO]", "Thanks for watching!", "(music)"] {
             assert!(is_hallucination(text, 0), "{text}");
             assert!(is_hallucination(text, 300), "{text}");
         }

@@ -113,3 +113,12 @@ The eval dictionary contains: ChargeBee, Manvi, Kubernetes, WhimprFlow, Priya Ra
 |---|---|
 | `30-fast-pharmacy.wav` | "can you please remind me to call the pharmacy before they close" — say it quickly, as you would when rushed |
 
+## very-short
+
+| File | Say |
+|---|---|
+| `31-very-short-no.wav` | "no" — one short word, under half a second; start right away |
+| `32-very-short-hi.wav` | "hi" — one short word, under half a second; start right away |
+| `33-very-short-bye.wav` | "bye" — one short word, under half a second; start right away |
+| `34-very-short-you.wav` | "you" — one short word, under half a second; start right away |
+
