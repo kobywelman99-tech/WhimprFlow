@@ -25,3 +25,13 @@ src-tauri/gen/
 .env
 .env.*
 *.pem
+
+# Eval recordings are your voice, and eval reports contain transcripts of what you dictated:
+# keep both local. The manifest and the recording script are tracked.
+eval/fixtures/*.wav
+eval/fixtures/*.aiff
+eval/fixtures/*.m4a
+eval/fixtures/*.mp3
+eval/fixtures/*.flac
+eval/reports/
+
