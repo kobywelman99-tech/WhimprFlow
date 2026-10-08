@@ -5,6 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use std::cell::RefCell;
+
+use whimpr_core::audio_gate::{self, GatePolicy, Gated, SpeechDetector};
 use whimpr_core::cleanup::CleanupLevel;
 use whimpr_core::pipeline::{self, Env, Providers};
 use whimpr_core::settings::{CleanupMode, Settings};
@@ -64,9 +67,11 @@ fn ms(since: Instant) -> u32 {
 }
 
 /// Everything a clip needs besides the clip itself.
-struct Ctx<'a> {
+struct Ctx<'a, 'd> {
     cfg: &'a Config,
     asr: &'a dyn Asr,
+    /// The voice-activity detector the app uses, if one is loaded.
+    detector: Option<RefCell<&'d mut (dyn SpeechDetector + 'd)>>,
     dictionary: &'a whimpr_core::dictionary::DictionaryStore,
     prompt: Option<String>,
     settings: Settings,
@@ -74,11 +79,18 @@ struct Ctx<'a> {
     cleanup_ran: bool,
 }
 
-pub fn run(manifest: &Manifest, cfg: &Config, asr: &dyn Asr, providers: Providers) -> Vec<FixtureResult> {
+pub fn run<'d>(
+    manifest: &Manifest,
+    cfg: &Config,
+    asr: &dyn Asr,
+    detector: Option<&'d mut (dyn SpeechDetector + 'd)>,
+    providers: Providers,
+) -> Vec<FixtureResult> {
     let dictionary = manifest.dictionary_store();
     let ctx = Ctx {
         cfg,
         asr,
+        detector: detector.map(RefCell::new),
         dictionary: &dictionary,
         prompt: whimpr_asr::vocab_prompt(&dictionary.bias_words()),
         settings: Settings {
@@ -105,7 +117,7 @@ pub fn run(manifest: &Manifest, cfg: &Config, asr: &dyn Asr, providers: Provider
         .collect()
 }
 
-fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx) -> anyhow::Result<FixtureResult> {
+fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx<'_, '_>) -> anyhow::Result<FixtureResult> {
     let mut result = FixtureResult::blank(&fx.id, &fx.category, Status::Ok);
     // A fixture with no golden text has nothing to approve.
     result.approved = fx.approved || fx.expected_cleaned.is_none();
@@ -120,10 +132,26 @@ fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx) -> anyhow::Result<FixtureResult
         result.skipped_silent = true;
         String::new()
     } else {
+        // The same gate the app runs: skip silence, trim the edges, pad very short clips.
         let started = Instant::now();
-        let text = ctx.asr.transcribe(&pcm, ctx.prompt.as_deref())?;
-        result.timings.asr_ms = ms(started);
-        text
+        let gated = match &ctx.detector {
+            Some(d) => audio_gate::gate(&pcm, Some(&mut **d.borrow_mut()), &GatePolicy::default()),
+            None => audio_gate::gate(&pcm, None, &GatePolicy::default()),
+        };
+        result.timings.vad_ms = if ctx.detector.is_some() { ms(started) } else { 0 };
+        match gated {
+            Gated::Skip(_) => {
+                result.skipped_silent = true;
+                String::new()
+            }
+            Gated::Audio { pcm: audio, speech_ms } => {
+                let started = Instant::now();
+                let text = ctx.asr.transcribe(&audio, ctx.prompt.as_deref())?;
+                result.timings.asr_ms = ms(started);
+                // Whisper's stock phrase for "nothing was said", on audio with next to no speech.
+                if speech_ms.is_some_and(|ms| audio_gate::is_hallucination(&text, ms)) { String::new() } else { text }
+            }
+        }
     };
     let raw = pipeline::fix_mishears(&heard, Some(ctx.dictionary), None);
     if let Some(expected) = &fx.expected_raw {
@@ -179,18 +207,39 @@ mod tests {
     struct FakeAsr {
         text: &'static str,
         calls: RefCell<Vec<Option<String>>>,
+        /// How many samples each call was given.
+        lengths: RefCell<Vec<usize>>,
     }
 
     impl FakeAsr {
         fn new(text: &'static str) -> Self {
-            Self { text, calls: RefCell::new(Vec::new()) }
+            Self { text, calls: RefCell::new(Vec::new()), lengths: RefCell::new(Vec::new()) }
         }
     }
 
     impl Asr for FakeAsr {
-        fn transcribe(&self, _: &[f32], prompt: Option<&str>) -> anyhow::Result<String> {
+        fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> anyhow::Result<String> {
             self.calls.borrow_mut().push(prompt.map(String::from));
+            self.lengths.borrow_mut().push(pcm.len());
             Ok(self.text.to_string())
+        }
+    }
+
+    /// Recognition that fails the test if it is ever asked to run.
+    struct NeverAsr;
+
+    impl Asr for NeverAsr {
+        fn transcribe(&self, _: &[f32], _: Option<&str>) -> anyhow::Result<String> {
+            panic!("recognition must not run on a clip with no speech");
+        }
+    }
+
+    /// A detector that reports the same probability for every frame.
+    struct Constant(f32);
+
+    impl SpeechDetector for Constant {
+        fn speech_probabilities(&mut self, pcm: &[f32]) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![self.0; pcm.len().div_ceil(audio_gate::FRAME_SAMPLES)])
         }
     }
 
@@ -235,7 +284,7 @@ mod tests {
         let manifest = Manifest::parse(MANIFEST).unwrap();
         let asr = FakeAsr::new("renew charge bee");
 
-        let results = run(&manifest, &config(&dir), &asr, Providers::default());
+        let results = run(&manifest, &config(&dir), &asr, None, Providers::default());
 
         let speech = &results[0];
         assert_eq!(speech.status, Status::Ok);
@@ -261,7 +310,7 @@ mod tests {
             r#"{"fixtures":[{"id":"q","wav":"quiet.wav","category":"silence","say":"","expect":"no_output"}]}"#,
         )
         .unwrap();
-        let results = run(&manifest, &config(&dir), &FakeAsr::new("Thank you."), Providers::default());
+        let results = run(&manifest, &config(&dir), &FakeAsr::new("Thank you."), None, Providers::default());
         assert_eq!(results[0].cleaned_pass, Some(false));
         assert!(results[0].reasons[0].contains("Thank you."));
     }
@@ -275,7 +324,7 @@ mod tests {
         assert_eq!((mono.len(), rate), (48_000, 48_000));
         let manifest = Manifest::parse(r#"{"fixtures":[{"id":"s","wav":"s.wav","category":"c","say":"x"}]}"#).unwrap();
         let asr = FakeAsr::new("x");
-        let results = run(&manifest, &config(&dir), &asr, Providers::default());
+        let results = run(&manifest, &config(&dir), &asr, None, Providers::default());
         assert_eq!(results[0].status, Status::Ok);
     }
 
@@ -284,7 +333,7 @@ mod tests {
         let dir = temp_dir("broken");
         std::fs::write(dir.join("s.wav"), b"not a wav").unwrap();
         let manifest = Manifest::parse(r#"{"fixtures":[{"id":"s","wav":"s.wav","category":"c","say":"x"}]}"#).unwrap();
-        let results = run(&manifest, &config(&dir), &FakeAsr::new("x"), Providers::default());
+        let results = run(&manifest, &config(&dir), &FakeAsr::new("x"), None, Providers::default());
         assert_eq!(results[0].status, Status::Error);
         assert!(results[0].error.is_some());
     }
@@ -296,6 +345,56 @@ mod tests {
         let manifest = Manifest::parse(MANIFEST).unwrap();
         let mut cfg = config(&dir);
         cfg.only = Some("speech".into());
-        assert_eq!(run(&manifest, &cfg, &FakeAsr::new("x"), Providers::default()).len(), 1);
+        assert_eq!(run(&manifest, &cfg, &FakeAsr::new("x"), None, Providers::default()).len(), 1);
+    }
+
+    const SILENCE_MANIFEST: &str = r#"{"fixtures":[{"id":"q","wav":"q.wav","category":"silence","say":"","expect":"no_output"}]}"#;
+
+    #[test]
+    fn noise_the_detector_calls_silence_never_reaches_recognition() {
+        // Loud enough to pass the old peak check, so only the detector can stop it.
+        let dir = temp_dir("gate");
+        write_wav(&dir, "q.wav", 16_000, 1, &tone(48_000, 0.05));
+        let manifest = Manifest::parse(SILENCE_MANIFEST).unwrap();
+        let mut detector = Constant(0.0);
+
+        let results = run(&manifest, &config(&dir), &NeverAsr, Some(&mut detector), Providers::default());
+
+        assert!(results[0].skipped_silent);
+        assert_eq!(results[0].text, "", "nothing would be pasted");
+        assert_eq!(results[0].cleaned_pass, Some(true));
+    }
+
+    #[test]
+    fn whispers_stock_phrase_on_next_to_no_speech_is_dropped() {
+        // 8 frames of "speech" (240 ms) is below what the detector treats as an utterance's
+        // floor for the stock phrases, and recognition says the usual hallucination.
+        let dir = temp_dir("halluc-gate");
+        write_wav(&dir, "q.wav", 16_000, 1, &tone(16_000, 0.05));
+        let manifest = Manifest::parse(SILENCE_MANIFEST).unwrap();
+        struct Blip;
+        impl SpeechDetector for Blip {
+            fn speech_probabilities(&mut self, pcm: &[f32]) -> anyhow::Result<Vec<f32>> {
+                let frames = pcm.len().div_ceil(audio_gate::FRAME_SAMPLES);
+                Ok((0..frames).map(|i| if (10..18).contains(&i) { 0.9 } else { 0.0 }).collect())
+            }
+        }
+        let results = run(&manifest, &config(&dir), &FakeAsr::new("Thank you."), Some(&mut Blip), Providers::default());
+        assert_eq!(results[0].text, "");
+        assert_eq!(results[0].cleaned_pass, Some(true));
+    }
+
+    #[test]
+    fn a_very_short_clip_reaches_recognition_padded_to_what_whisper_accepts() {
+        let dir = temp_dir("short");
+        write_wav(&dir, "s.wav", 16_000, 1, &tone(6_400, 0.3)); // 0.4 s: a quick "yes"
+        let manifest = Manifest::parse(r#"{"fixtures":[{"id":"s","wav":"s.wav","category":"very-short","say":"yes"}]}"#).unwrap();
+        let asr = FakeAsr::new("yes");
+        let mut detector = Constant(0.9);
+
+        run(&manifest, &config(&dir), &asr, Some(&mut detector), Providers::default());
+
+        let given = asr.lengths.borrow()[0];
+        assert!(given >= audio_gate::MIN_WHISPER_SAMPLES, "whisper was handed only {given} samples");
     }
 }

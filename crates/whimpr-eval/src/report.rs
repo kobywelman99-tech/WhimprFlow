@@ -7,6 +7,9 @@ use whimpr_core::stats::percentile;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Timings {
     pub resample_ms: u32,
+    /// Voice-activity detection (0 when no detector ran).
+    #[serde(default)]
+    pub vad_ms: u32,
     pub asr_ms: u32,
     /// The cleanup call (0 when it didn't run).
     #[serde(default)]
@@ -175,12 +178,14 @@ impl Report {
             if s.unapproved_goldens > 0 { format!(" ({} golden texts not yet approved)", s.unapproved_goldens) } else { String::new() },
         ));
         out.push_str(&format!(
-            "latency ms  p50: resample {} asr {} cleanup {} review {}   p95: resample {} asr {} cleanup {} review {}\n",
+            "latency ms  p50: resample {} vad {} asr {} cleanup {} review {}   p95: resample {} vad {} asr {} cleanup {} review {}\n",
             s.p50.resample_ms,
+            s.p50.vad_ms,
             s.p50.asr_ms,
             s.p50.cleanup_ms,
             s.p50.review_ms,
             s.p95.resample_ms,
+            s.p95.vad_ms,
             s.p95.asr_ms,
             s.p95.cleanup_ms,
             s.p95.review_ms
@@ -201,6 +206,7 @@ fn summarize(results: &[FixtureResult]) -> Summary {
     let wers: Vec<f64> = ran.iter().filter_map(|r| r.raw_wer).collect();
     let stage = |p: f64| Timings {
         resample_ms: percentile(&ran.iter().map(|r| r.timings.resample_ms).collect::<Vec<_>>(), p).unwrap_or(0),
+        vad_ms: percentile(&ran.iter().map(|r| r.timings.vad_ms).filter(|&ms| ms > 0).collect::<Vec<_>>(), p).unwrap_or(0),
         asr_ms: percentile(
             &ran.iter().filter(|r| !r.skipped_silent).map(|r| r.timings.asr_ms).collect::<Vec<_>>(),
             p,
@@ -250,11 +256,13 @@ pub fn compare(before: &Report, after: &Report) -> String {
     ));
     out.push_str("latency p50:\n");
     out.push_str(&delta_ms("resample", b.p50.resample_ms, a.p50.resample_ms));
+    out.push_str(&delta_ms("vad", b.p50.vad_ms, a.p50.vad_ms));
     out.push_str(&delta_ms("asr", b.p50.asr_ms, a.p50.asr_ms));
     out.push_str(&delta_ms("cleanup", b.p50.cleanup_ms, a.p50.cleanup_ms));
     out.push_str(&delta_ms("review", b.p50.review_ms, a.p50.review_ms));
     out.push_str("latency p95:\n");
     out.push_str(&delta_ms("resample", b.p95.resample_ms, a.p95.resample_ms));
+    out.push_str(&delta_ms("vad", b.p95.vad_ms, a.p95.vad_ms));
     out.push_str(&delta_ms("asr", b.p95.asr_ms, a.p95.asr_ms));
     out.push_str(&delta_ms("cleanup", b.p95.cleanup_ms, a.p95.cleanup_ms));
     out.push_str(&delta_ms("review", b.p95.review_ms, a.p95.review_ms));
@@ -297,7 +305,7 @@ mod tests {
             cleaned_pass: pass,
             pipeline_ran: true,
             approved: true,
-            timings: Timings { resample_ms: 1, asr_ms: asr, cleanup_ms: pipe, review_ms: 0 },
+            timings: Timings { resample_ms: 1, vad_ms: 0, asr_ms: asr, cleanup_ms: pipe, review_ms: 0 },
             ..FixtureResult::blank(id, "c", Status::Ok)
         }
     }

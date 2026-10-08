@@ -149,6 +149,9 @@ mod imp {
     /// (Whisper re-decodes the whole buffer so far each tick; on a long
     /// utterance a decode can take longer than the tick interval).
     static PARTIAL_BUSY: AtomicBool = AtomicBool::new(false);
+    /// Voice-activity detector (Silero); `None` until loaded, or if it couldn't load, in
+    /// which case every recording goes to recognition whole, as it did before VAD.
+    static VAD: OnceLock<Mutex<Option<whimpr_vad::SileroDetector>>> = OnceLock::new();
     /// When the Fn event that ended the recording arrived; the start of the latency clock.
     static STOP_TRIGGER_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
@@ -741,11 +744,42 @@ mod imp {
                     let resample_started = Instant::now();
                     let pcm = whimpr_audio::resample_to_16k(&res.samples, res.sample_rate);
                     let resample_ms = ms_since(resample_started);
+
+                    // Skip recordings with nobody speaking, trim the quiet edges, and pad
+                    // very short clips (whisper.cpp returns nothing under one second).
+                    let vad_started = Instant::now();
+                    let gated = {
+                        let mut slot = VAD.get().map(|m| m.lock_recover());
+                        let detector = slot
+                            .as_mut()
+                            .and_then(|g| g.as_mut())
+                            .map(|d| d as &mut dyn whimpr_core::audio_gate::SpeechDetector);
+                        whimpr_core::audio_gate::gate(&pcm, detector, &whimpr_core::audio_gate::GatePolicy::default())
+                    };
+                    let vad_ms = ms_since(vad_started);
+                    let (pcm, speech_ms) = match gated {
+                        whimpr_core::audio_gate::Gated::Skip(_) => {
+                            eprintln!("[whimpr] no speech heard ({vad_ms} ms) — nothing to transcribe");
+                            if was_real_attempt {
+                                crate::diag::report(&app2, whimpr_core::InjectionFailure::EmptyTranscript);
+                            }
+                            finish();
+                            return;
+                        }
+                        whimpr_core::audio_gate::Gated::Audio { pcm, speech_ms } => (pcm, speech_ms),
+                    };
+
                     let asr_started = Instant::now();
                     let transcribed = asr.transcribe_with_prompt(&pcm, whisper_prompt().as_deref());
                     let asr_ms = ms_since(asr_started);
                     match transcribed {
-                        Ok(t) => {
+                        Ok(mut t) => {
+                            // Whisper's stock phrase for "nothing was said" ("Thank you."),
+                            // on audio the detector found next to no speech in.
+                            if speech_ms.is_some_and(|ms| whimpr_core::audio_gate::is_hallucination(&t.text, ms)) {
+                                eprintln!("[whimpr] dropped a likely hallucination: {:?}", t.text);
+                                t.text.clear();
+                            }
                             // Known mishears (voice calibration + dictionary) are fixed
                             // before anything else, so every cleanup mode benefits.
                             let raw = fix_mishears(&t.text);
@@ -797,6 +831,7 @@ mod imp {
                                 let timings = whimpr_core::stats::Timings {
                                     stop_ms,
                                     resample_ms,
+                                    vad_ms,
                                     asr_ms,
                                     cleanup_ms,
                                     review_ms,
@@ -804,9 +839,10 @@ mod imp {
                                     total_ms: ms_since(key_up_at),
                                 };
                                 eprintln!(
-                                    "[whimpr] timings (ms): stop {} resample {} asr {} cleanup {} review {} paste {} total {}",
+                                    "[whimpr] timings (ms): stop {} resample {} vad {} asr {} cleanup {} review {} paste {} total {}",
                                     timings.stop_ms,
                                     timings.resample_ms,
+                                    timings.vad_ms,
                                     timings.asr_ms,
                                     timings.cleanup_ms,
                                     timings.review_ms,
@@ -898,6 +934,18 @@ mod imp {
         let _ = APP.set(app);
         let _ = MACHINE.set(Mutex::new(StateMachine::new()));
         let _ = CLOCK.set(Instant::now());
+
+        // Load the voice-activity model (small and fast) so silence can be skipped.
+        let _ = VAD.set(Mutex::new(None));
+        std::thread::spawn(|| match whimpr_vad::SileroDetector::load(&support_dir().join("models")) {
+            Ok(detector) => {
+                if let Some(slot) = VAD.get() {
+                    *slot.lock_recover() = Some(detector);
+                }
+                eprintln!("[whimpr] voice-activity model loaded");
+            }
+            Err(e) => eprintln!("[whimpr] voice-activity model unavailable ({e}); recordings go to recognition whole"),
+        });
 
         // Load the speech-to-text model off the main thread (it takes ~1s).
         std::thread::spawn(|| {

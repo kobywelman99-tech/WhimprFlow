@@ -13,6 +13,7 @@ whimpr-core = { path = "../whimpr-core" }
 whimpr-asr = { path = "../whimpr-asr" }
 whimpr-audio = { path = "../whimpr-audio" }
 whimpr-cleanup = { path = "../whimpr-cleanup" }
+whimpr-vad = { path = "../whimpr-vad" }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "whimpr-vad"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Silero voice-activity detection behind whimpr-core's SpeechDetector trait. The model
+# is embedded, so there is nothing to download. Uses transcribe-rs's ONNX Runtime (ort),
+# the same one the Parakeet backend will share.
+[dependencies]
+whimpr-core = { path = "../whimpr-core" }
+anyhow = { workspace = true }
+transcribe-rs = { version = "0.3.12", default-features = false, features = ["vad-silero"] }
+
+[dev-dependencies]
+hound = "3"

@@ -84,6 +84,8 @@ impl WhisperEngine {
         // producing the sentence twice. Single-segment mode avoids that.
         params.set_single_segment(true);
         params.set_no_context(true);
+        // Never write "[BLANK_AUDIO]", music notes and similar markers as if they were speech.
+        params.set_suppress_non_speech_tokens(true);
         if let Some(prompt) = prompt {
             params.set_initial_prompt(prompt);
         }

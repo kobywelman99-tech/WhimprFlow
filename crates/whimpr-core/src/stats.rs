@@ -25,6 +25,9 @@ pub struct Timings {
     /// Key-up until the microphone is stopped and the audio is in hand.
     pub stop_ms: u32,
     pub resample_ms: u32,
+    /// Voice-activity detection (trimming and skipping silence).
+    #[serde(default)]
+    pub vad_ms: u32,
     /// Speech recognition.
     pub asr_ms: u32,
     /// The cleanup call (0 when cleanup didn't run).
@@ -38,10 +41,11 @@ pub struct Timings {
 
 impl Timings {
     /// Stage name and value, in pipeline order.
-    pub fn stages(&self) -> [(&'static str, u32); 7] {
+    pub fn stages(&self) -> [(&'static str, u32); 8] {
         [
             ("stop", self.stop_ms),
             ("resample", self.resample_ms),
+            ("vad", self.vad_ms),
             ("asr", self.asr_ms),
             ("cleanup", self.cleanup_ms),
             ("review", self.review_ms),
@@ -318,7 +322,7 @@ mod tests {
             chars: 10,
             text: "a b c".into(),
             app: None,
-            timings: Timings { stop_ms: 5, resample_ms: 1, asr_ms: asr, cleanup_ms: cleanup, review_ms: 0, paste_ms: 210, total_ms: total },
+            timings: Timings { stop_ms: 5, resample_ms: 1, vad_ms: 8, asr_ms: asr, cleanup_ms: cleanup, review_ms: 0, paste_ms: 210, total_ms: total },
         }
     }
 
@@ -331,7 +335,7 @@ mod tests {
         }
         let lat = s.latency();
         let by = |name: &str| lat.iter().find(|l| l.stage == name).unwrap().clone();
-        assert_eq!(lat.len(), 7);
+        assert_eq!(lat.len(), 8);
         let asr = by("asr");
         assert_eq!((asr.p50_ms, asr.p95_ms, asr.n), (50, 95, 100));
         let cleanup = by("cleanup");

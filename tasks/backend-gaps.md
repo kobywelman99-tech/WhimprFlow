@@ -121,10 +121,22 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 **Also (found in Task 2):** pad clips shorter than 1 s with trailing silence before whisper, because whisper.cpp returns nothing for them today (a quick "yes" is dropped). Add a policy test and an eval clip check (25, 26, 27).
 **Spike first (4a):** confirm `vad-rs`/`ort` builds on this toolchain (workspace `rust-version` is 1.82; ort rc may need more, so bump and say so), downloads its runtime, and costs < ~10 ms per clip. If not, fall back to a pure-Rust Silero via `tract`, or stop and ask.
 **Acceptance criteria:**
-- [ ] Policy unit tests: silence → Skip; short noise burst → Skip; speech with long lead/tail → Trim with padding; speech-only unchanged; very short real word kept
-- [ ] **Gate test:** a silence-only clip never reaches ASR and nothing is pasted (fake ASR that fails the test if called)
-- [ ] Eval: silence clips yield no output; speech clips' WER not worse; before/after table recorded
+- [x] Policy unit tests: silence → Skip; short noise burst → Skip; speech with long lead/tail → Trim with padding; speech-only unchanged; very short real word kept
+- [x] **Gate test:** a silence-only clip never reaches ASR and nothing is pasted (fake ASR that fails the test if called)
+- [x] Eval: silence clips yield no output; speech clips' WER not worse; before/after table recorded (on the smoke set; see Eval log)
 **Verification:** `cargo test -p whimpr-core -p whimpr-vad`, eval before/after, manual dictate-then-stay-silent
+
+**Progress:**
+- [x] **Spike 4a:** `vad-rs` pins `ort =2.0.0-rc.9`, which cannot resolve alongside the `ort` Parakeet's `transcribe-rs` needs (exact pins plus a native `links` key). Used `transcribe-rs`'s own `vad-silero` feature instead: one shared `ort` (rc.13) for VAD now and Parakeet later. Builds here; about 0.1 ms per 30 ms frame (5 ms p50, 8 ms p95 per clip in the eval)
+- [x] **Workspace `rust-version` raised from 1.82 to 1.88** (`ort` rc.13 requires it; the local toolchain is 1.98). Say if that's a problem for any build machine
+- [x] `whimpr_core::audio_gate`: `plan` (speech runs, merging pauses under 600 ms, dropping blips under about 200 ms, 150 ms padding, Silero's start 0.5 / continue 0.35 hysteresis so soft word endings aren't clipped), `pad_for_whisper`, `gate`, `is_hallucination`. 12 tests
+- [x] `whimpr-vad`: Silero v4 (MIT) embedded (1.8 MB), wrapped as a `SpeechDetector`; 5 tests on the real model and the public-domain JFK sample, including "quiet around the speech is trimmed, the loudest part survives" and "no state leaks between clips"
+- [x] `hotkey.rs`: load the detector at launch (falls back to the old behavior if it can't load); skip recognition on no speech (reports an empty-transcript notice only for real attempts); trim; pad; drop whisper's stock phrases when there was almost no speech; `vad` is a new timing stage in the log, stats and Insights
+- [x] whisper: `suppress_non_speech_tokens(true)`. `no_speech_thold` is left at whisper's default (0.6): changing it can't be judged without your recordings
+- [x] **Fixed a real bug:** whisper.cpp returns nothing for clips under 1 s, so a quick "yes" was silently dropped. Clips are now padded to 1.1 s (smoke set: "yes" and "thanks" went from WER 1.00 to 0.00)
+- [ ] Not changed: the live preview in the pill still decodes silence and can show "Thank you." (it is never pasted)
+- [ ] Koby: dictate, then hold the key and say nothing; confirm nothing is pasted and the notice appears. Also dictate a single word ("yes", "okay")
+
 **Dependencies:** T2, T3 · **Files:** `crates/whimpr-core/src/audio_gate.rs`, `crates/whimpr-vad/**`, `crates/whimpr-asr/src/lib.rs`, `src-tauri/src/hotkey.rs` · **Scope:** L
 
 ### Task 5: Local LLM worker robustness
@@ -322,3 +334,15 @@ Name files `NN-category-slug.wav` in `eval/fixtures/`. Speak naturally; one take
 | 28 | long (~30 s) | read any paragraph aloud at normal pace | cleaned paragraph |
 | 29 | noisy | fan or music on: "send the invoice to accounting by Friday" | Send the invoice to accounting by Friday. |
 | 30 | fast | quickly: "can you please remind me to call the pharmacy before they close" | Can you please remind me to call the pharmacy before they close. |
+
+---
+
+## Eval log
+Numbers from `whimpr-eval`. **Until Koby's 30 clips exist, the only data is a smoke set** (10 clips read by the macOS `say` voice plus synthetic silence and noise), whisper `base.en`, `--provider none`. It proves the change works; it is not a baseline for accuracy on your voice.
+
+| When | Change | Set | Raw WER (mean) | Notes |
+|---|---|---|---|---|
+| Task 2 | harness first run, no gate | smoke (10 `say` clips) | 0.275 | "yes" and "thanks" 1.00: whisper returned nothing for clips under 1 s |
+| Task 4 | padding only (`--no-vad`) | smoke (10 clips + 3 silent/noise) | 0.075 | very short clips fixed. Faint noise above the old peak gate: whisper wrote "raine.com" and took 1172 ms |
+| Task 4 | padding + VAD | same | 0.075 | noise clip: skipped in 7 ms, nothing pasted. VAD cost p50 5 ms, p95 8 ms. ASR p95 1172 → 89 ms. Speech clips unchanged in WER (transcriptions of trimmed clips can differ slightly) |
+

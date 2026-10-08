@@ -10,6 +10,7 @@
 //! settings, and storage modules.
 
 pub mod asr;
+pub mod audio_gate;
 pub mod brain;
 pub mod calibration;
 pub mod cleanup;

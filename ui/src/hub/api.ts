@@ -64,7 +64,7 @@ export const UNKNOWN_STATUS: Status = {
 // p50/p95 of one pipeline stage over the last 200 measured dictations. `n` is how many
 // dictations the stage actually ran in (cleanup doesn't run in Raw mode).
 export interface StageLatency {
-  stage: "stop" | "resample" | "asr" | "cleanup" | "review" | "paste" | "total";
+  stage: "stop" | "resample" | "vad" | "asr" | "cleanup" | "review" | "paste" | "total";
   p50_ms: number;
   p95_ms: number;
   n: number;

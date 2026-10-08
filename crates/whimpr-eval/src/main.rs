@@ -24,6 +24,7 @@ USAGE: cargo run -p whimpr-eval [--release] -- [OPTIONS]
                           anthropic/openai read ANTHROPIC_API_KEY / OPENAI_API_KEY
   --level L               none | light (default) | medium | high
   --no-review             skip the sense check
+  --no-vad                skip voice-activity detection (to compare with and without)
   --show-text             also print what was heard and what would be pasted, per clip
   --runs N                run cleanup N times per clip, to see LLM variance (default 1)
   --only TEXT             only fixtures whose id contains TEXT
@@ -42,6 +43,7 @@ struct Args {
     provider: String,
     level: Option<String>,
     no_review: bool,
+    no_vad: bool,
     show_text: bool,
     runs: usize,
     only: Option<String>,
@@ -64,6 +66,7 @@ fn parse_args() -> Result<Args> {
             "--provider" => args.provider = value("--provider")?,
             "--level" => args.level = Some(value("--level")?),
             "--no-review" => args.no_review = true,
+            "--no-vad" => args.no_vad = true,
             "--show-text" => args.show_text = true,
             "--runs" => args.runs = value("--runs")?.parse().context("--runs wants a number")?,
             "--only" => args.only = Some(value("--only")?),
@@ -207,7 +210,19 @@ fn main() -> Result<()> {
         runs: args.runs.max(1),
         only: args.only.clone(),
     };
-    let results = runner::run(&manifest, &cfg, &engine, providers);
+    let mut silero = if args.no_vad {
+        None
+    } else {
+        match whimpr_vad::SileroDetector::load(&models_dir()) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                eprintln!("voice-activity detection unavailable ({e}); running without it");
+                None
+            }
+        }
+    };
+    let detector = silero.as_mut().map(|d| d as &mut dyn whimpr_core::audio_gate::SpeechDetector);
+    let results = runner::run(&manifest, &cfg, &engine, detector, providers);
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let meta = Meta {

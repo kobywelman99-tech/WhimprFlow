@@ -215,6 +215,7 @@ function Tabs({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
 const STAGE_LABELS: Record<StageLatency["stage"], string> = {
   stop: "Stop recording",
   resample: "Resample",
+  vad: "Voice detection",
   asr: "Speech recognition",
   cleanup: "Cleanup",
   review: "Sense check",
