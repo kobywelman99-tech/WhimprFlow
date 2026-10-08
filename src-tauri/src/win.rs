@@ -48,6 +48,7 @@ static CAPTURE: OnceLock<Mutex<Option<whimpr_audio::CaptureHandle>>> = OnceLock:
 static ASR: OnceLock<Arc<whimpr_asr::WhisperEngine>> = OnceLock::new();
 static LOCAL: OnceLock<Mutex<Option<crate::local_llm::LocalWorker>>> = OnceLock::new();
 static OPENAI: OnceLock<Mutex<Option<whimpr_cleanup::OpenAiProvider>>> = OnceLock::new();
+static ANTHROPIC: OnceLock<Mutex<Option<whimpr_cleanup::AnthropicProvider>>> = OnceLock::new();
 static SETTINGS: OnceLock<Mutex<whimpr_core::Settings>> = OnceLock::new();
 static DICTIONARY: OnceLock<Mutex<whimpr_core::DictionaryStore>> = OnceLock::new();
 static BRAIN: OnceLock<Mutex<whimpr_core::brain::Brain>> = OnceLock::new();
@@ -252,6 +253,10 @@ fn clean_with_model(raw: &str) -> String {
     };
     let result = match settings.cleanup_mode {
         CleanupMode::OpenAi => OPENAI
+            .get()
+            .and_then(|m| m.lock().unwrap().as_ref().map(|p| p.cleanup(&raw_norm, &ctx)))
+            .or_else(run_local),
+        CleanupMode::Anthropic => ANTHROPIC
             .get()
             .and_then(|m| m.lock().unwrap().as_ref().map(|p| p.cleanup(&raw_norm, &ctx)))
             .or_else(run_local),
@@ -486,6 +491,7 @@ pub fn install(app: AppHandle) {
     let _ = STATS.set(Mutex::new(whimpr_core::StatsStore::load(&stats_path())));
     let _ = STYLE.set(Mutex::new(whimpr_core::StyleStore::load(&style_path())));
     let _ = OPENAI.set(Mutex::new(None));
+    let _ = ANTHROPIC.set(Mutex::new(None));
     let _ = LOCAL.set(Mutex::new(None));
     rebuild_providers();
 
@@ -543,6 +549,11 @@ pub fn rebuild_providers() {
         *slot.lock().unwrap() = key.map(|k| {
             whimpr_cleanup::OpenAiProvider::with_base_url(k, model, Some(base_url))
         });
+    }
+    let anthropic_key = whimpr_core::CredentialStore::load(&credentials_path()).get("anthropic_api_key");
+    if let Some(slot) = ANTHROPIC.get() {
+        *slot.lock().unwrap() =
+            anthropic_key.map(|k| whimpr_cleanup::AnthropicProvider::new(k, settings.anthropic_model.clone()));
     }
 }
 
