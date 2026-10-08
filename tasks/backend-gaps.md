@@ -163,6 +163,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 ### Checkpoint 0
 - [ ] Review with Koby: Task 0–5 commits; Koby's recorded clips exist and the **baseline eval report** is saved in `eval/reports/`
 - [ ] Silence no longer pastes anything; a hung local worker no longer freezes dictation
+- Koby said to continue to Phase 1 without waiting for the recordings, so the baseline comparison for Tasks 6-8 uses the smoke set until the real clips exist
 - Status: all five tasks are built and tested; **the real-world checks are still yours** (record the clips, try silence and a quick "yes", try Local mode with a real model, run `cargo check` on Windows)
 
 ---
@@ -275,7 +276,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 
 ### Open before any release (found in code review)
 - [ ] **Acknowledgements:** the shipped desktop and iOS apps must show the licences of bundled third-party data: Silero VAD (MIT, `crates/whimpr-vad/models/LICENSE-SILERO`) and CMUdict (BSD-style, `crates/whimpr-core/data/CMUDICT-LICENSE`, whose binary-redistribution clause requires reproducing its notice). A screen or file in the app, not just the repo
-- [ ] **Word-frequency data licence is unresolved.** `crates/whimpr-core/data/wordfreq.txt` comes from Norvig's `count_1w.txt`; his MIT grant covers his *code*, and the data is described only as derived from the Google Web Trillion Word Corpus via the LDC. Earlier notes in this file and in commit messages called it MIT; that was not verified and should be read as unresolved. It feeds the voice brain's word prior, and removing it would need a replacement (e.g. counts computed from CC0 text such as Common Voice's sentences). Koby's call
+- [ ] **Word-frequency data licence is unresolved.** `crates/whimpr-core/data/wordfreq.txt` comes from Norvig's `count_1w.txt`; his MIT grant covers his *code*, and the data is described only as derived from the Google Web Trillion Word Corpus via the LDC. Earlier notes in this file and in commit messages called it MIT; that was not verified and should be read as unresolved. It feeds the voice brain's word prior, and removing it would need a replacement (e.g. counts computed from CC0 text such as Common Voice's sentences). **Decision (Koby, 2026-10-07): keep it for now; revisit before any release**
 - [x] Eval recordings and reports are now git-ignored (`eval/fixtures/*.wav`, `eval/reports/`); the manifest and the recording script stay tracked
 
 ### Optional (not started without your OK)
