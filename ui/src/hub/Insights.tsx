@@ -2,7 +2,7 @@ import { useState } from "react";
 import { font } from "../tokens/values";
 import { theme } from "./theme";
 import { Card, PageTitle, useStats } from "./ui";
-import type { StatsSummary } from "./api";
+import type { StageLatency, StatsSummary } from "./api";
 import { fmtCompact, fmtNum, newsArticles } from "./format";
 
 // ── Semicircular gauge ───────────────────────────────────────────────────────
@@ -212,6 +212,65 @@ function Tabs({ tab, onChange }: { tab: Tab; onChange: (t: Tab) => void }) {
   );
 }
 
+const STAGE_LABELS: Record<StageLatency["stage"], string> = {
+  stop: "Stop recording",
+  resample: "Resample",
+  asr: "Speech recognition",
+  cleanup: "Cleanup",
+  review: "Sense check",
+  paste: "Paste",
+  total: "Total, key-up to pasted",
+};
+
+const fmtMs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${ms} ms`);
+
+// Where the time goes between letting go of the key and the text appearing.
+function SpeedCard({ latency }: { latency: StageLatency[] }) {
+  const measured = latency.some((l) => l.n > 0);
+  return (
+    <Card style={{ flex: "1 1 100%", minWidth: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+        <div style={{ fontSize: 14, fontWeight: 600, color: theme.textStrong }}>Speed</div>
+        <div style={{ fontSize: 12, color: theme.textFaint }}>last 200 dictations</div>
+      </div>
+      {!measured ? (
+        <div style={{ fontSize: 13, color: theme.textMuted }}>
+          Dictate something and the time each step takes will show up here.
+        </div>
+      ) : (
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, color: theme.textBody }}>
+          <thead>
+            <tr style={{ color: theme.textMuted, textAlign: "right" }}>
+              <th style={{ textAlign: "left", fontWeight: 500, padding: "4px 0" }}>Step</th>
+              <th style={{ fontWeight: 500 }}>Typical (p50)</th>
+              <th style={{ fontWeight: 500 }}>Slow (p95)</th>
+              <th style={{ fontWeight: 500 }}>Dictations</th>
+            </tr>
+          </thead>
+          <tbody>
+            {latency.map((l) => (
+              <tr
+                key={l.stage}
+                style={{
+                  textAlign: "right",
+                  borderTop: `1px solid ${theme.border}`,
+                  fontWeight: l.stage === "total" ? 600 : 400,
+                  color: l.n === 0 ? theme.textFaint : undefined,
+                }}
+              >
+                <td style={{ textAlign: "left", padding: "7px 0" }}>{STAGE_LABELS[l.stage]}</td>
+                <td>{l.n === 0 ? "–" : fmtMs(l.p50_ms)}</td>
+                <td>{l.n === 0 ? "–" : fmtMs(l.p95_ms)}</td>
+                <td>{l.n}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Card>
+  );
+}
+
 function UsageTab({ stats }: { stats: StatsSummary }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -252,6 +311,10 @@ function UsageTab({ stats }: { stats: StatsSummary }) {
             Each square is a day. Keep the streak alive by dictating something every day.
           </div>
         </Card>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 18 }}>
+        <SpeedCard latency={stats.latency ?? []} />
       </div>
     </div>
   );

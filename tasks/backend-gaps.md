@@ -101,11 +101,19 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 ### Task 3: Latency instrumentation + Insights
 **Description:** A `Timings` struct (`stop_ms` key-up → audio stopped, `resample_ms`, `asr_ms`, `cleanup_ms`, `review_ms`, `paste_ms`, `total_ms`) carried through `pipeline` and `hotkey.rs` (`Instant` at Fn-up, `hotkey.rs:923`). Log one `[whimpr] timings …` line per dictation. Add `#[serde(default)]` timing fields to `SessionRecord`, a `record_timed` method (the 6-argument `record` stays), a pure `percentile` helper, and p50/p95 + n per stage in `StatsSummary`. New "Speed" card in `Insights.tsx`; `api.ts` gets the new fields and `EMPTY_STATS`. Zero timings (old records) are excluded.
 **Acceptance criteria:**
-- [ ] An old `stats.json` without timing fields loads unchanged
-- [ ] Percentiles correct on known data, zero/empty handled
-- [ ] A real dictation produces a timings log line and shows in Insights
-- [ ] The eval harness reports the same stage names
+- [x] An old `stats.json` without timing fields loads unchanged
+- [x] Percentiles correct on known data, zero/empty handled
+- [ ] A real dictation produces a timings log line and shows in Insights (Koby, below)
+- [x] The eval harness reports the same stage names
 **Verification:** `cargo test -p whimpr-core` (stats), `cd ui && pnpm build`, manual `./dev.sh`
+
+**Progress:**
+- [x] `stats::Timings` (stop, resample, asr, cleanup, review, paste, total), `StageLatency`, `SessionRecord.timings` (`#[serde(default)]`), `StatsStore::push` / `latency()` (p50/p95 over the last 200 measured dictations, stages that didn't run are excluded rather than counted as 0 ms), `StatsSummary.latency`. 3 new stats tests
+- [x] `pipeline::Output` carries `cleanup_ms` and `review_ms`; the eval harness now reports `asr`, `cleanup`, `review` with the same names and the same "didn't run isn't zero" rule
+- [x] `hotkey.rs`: the clock starts at the Fn event that ended the recording (works for hands-free too); one `[whimpr] timings (ms): …` line per dictation; timings saved with the session. `record()` is unchanged, so `win.rs` still compiles as it was
+- [x] Insights has a "Speed" card (p50, p95, count per step); `pnpm build` clean
+- [ ] Koby: with `./dev.sh`, dictate a few times, watch the terminal for the `timings` line, then open Insights ▸ Your Usage and confirm the Speed card fills in
+
 **Dependencies:** T1 · **Files:** `crates/whimpr-core/src/stats.rs`, `pipeline.rs`, `src-tauri/src/hotkey.rs`, `ui/src/hub/api.ts`, `Insights.tsx` · **Scope:** M
 
 ### Task 4: Silero VAD (trim + skip silence)

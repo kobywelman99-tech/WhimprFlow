@@ -149,6 +149,16 @@ mod imp {
     /// (Whisper re-decodes the whole buffer so far each tick; on a long
     /// utterance a decode can take longer than the tick interval).
     static PARTIAL_BUSY: AtomicBool = AtomicBool::new(false);
+    /// When the Fn event that ended the recording arrived; the start of the latency clock.
+    static STOP_TRIGGER_AT: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+    fn ms_since(started: Instant) -> u32 {
+        started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
+    }
+
+    fn mark_stop_trigger() {
+        *STOP_TRIGGER_AT.get_or_init(|| Mutex::new(None)).lock_recover() = Some(Instant::now());
+    }
     /// How often to re-decode the in-progress recording for the live partial
     /// transcript shown in the pill.
     const PARTIAL_TICK: Duration = Duration::from_millis(900);
@@ -209,7 +219,7 @@ mod imp {
 
     /// Log one completed dictation to the stats store (words, speaking time, text,
     /// target app) and persist it. Powers both the Hub stats and the history list.
-    pub fn record_dictation(text: &str, duration_secs: f32) {
+    pub fn record_dictation(text: &str, duration_secs: f32, timings: whimpr_core::stats::Timings) {
         let words = whimpr_core::stats::count_words(text);
         if words == 0 {
             return;
@@ -219,7 +229,15 @@ mod imp {
             let mut store = m.lock_recover();
             let duration_ms = (duration_secs.max(0.0) * 1000.0) as u32;
             let chars = text.chars().count() as u32;
-            store.record(words, duration_ms, chars, unix_now(), text.to_string(), app);
+            store.push(whimpr_core::SessionRecord {
+                ts_unix: unix_now(),
+                words,
+                duration_ms,
+                chars,
+                text: text.to_string(),
+                app,
+                timings,
+            });
             let _ = store.save(&stats_path());
         }
     }
@@ -456,7 +474,7 @@ mod imp {
     /// Clean a raw transcript and give it the sense check. The logic lives in
     /// `whimpr_core::pipeline` (shared with the eval harness); this wires in the
     /// statics and tells the user when cleanup couldn't run.
-    fn clean_transcript(app: &AppHandle, raw: &str) -> String {
+    fn clean_transcript(app: &AppHandle, raw: &str) -> (String, u32, u32) {
         use whimpr_core::pipeline::{self, CleanupStep, Env, Providers, ReviewStep};
 
         let settings = current_settings();
@@ -512,7 +530,7 @@ mod imp {
             ReviewStep::Refused(why) => eprintln!("[whimpr] sense check: {why}"),
             ReviewStep::NotRun | ReviewStep::Unchanged => {}
         }
-        out.text
+        (out.text, out.cleanup_ms, out.review_ms)
     }
 
     /// While recording, periodically re-decode the audio captured so far with
@@ -670,6 +688,10 @@ mod imp {
             Action::StopCaptureAndFinalize { session } => {
                 let app2 = app.clone();
                 let handle = CAPTURE.get().and_then(|slot| slot.lock_recover().take());
+                let key_up_at = STOP_TRIGGER_AT
+                    .get()
+                    .and_then(|m| m.lock_recover().take())
+                    .unwrap_or_else(Instant::now);
                 std::thread::spawn(move || {
                     // Whatever happens, return the pill to idle (done -> idle).
                     let finish =
@@ -679,6 +701,7 @@ mod imp {
                         finish();
                         return;
                     };
+                    let stop_ms = ms_since(key_up_at);
                     let peak = res.samples.iter().fold(0f32, |m, &s| m.max(s.abs()));
                     eprintln!(
                         "[whimpr] captured {} samples @ {} Hz (~{:.2}s), peak {:.4}",
@@ -715,8 +738,13 @@ mod imp {
                         finish();
                         return;
                     };
+                    let resample_started = Instant::now();
                     let pcm = whimpr_audio::resample_to_16k(&res.samples, res.sample_rate);
-                    match asr.transcribe_with_prompt(&pcm, whisper_prompt().as_deref()) {
+                    let resample_ms = ms_since(resample_started);
+                    let asr_started = Instant::now();
+                    let transcribed = asr.transcribe_with_prompt(&pcm, whisper_prompt().as_deref());
+                    let asr_ms = ms_since(asr_started);
+                    match transcribed {
                         Ok(t) => {
                             // Known mishears (voice calibration + dictionary) are fixed
                             // before anything else, so every cleanup mode benefits.
@@ -741,12 +769,15 @@ mod imp {
                                 }
                             }
                             // Clean the transcript (cloud LLM if configured), then paste.
-                            let text = clean_transcript(&app2, &raw);
+                            let (text, cleanup_ms, review_ms) = clean_transcript(&app2, &raw);
                             if text != raw {
                                 eprintln!("[whimpr] CLEANED:   \"{}\"", text);
                             }
                             if !text.is_empty() {
-                                if let Err(e) = crate::paste::paste_text(&text) {
+                                let paste_started = Instant::now();
+                                let pasted = crate::paste::paste_text(&text);
+                                let paste_ms = ms_since(paste_started);
+                                if let Err(e) = pasted {
                                     eprintln!("[whimpr] paste failed: {e}");
                                     // Distinguish the two real causes: Accessibility was
                                     // never (or no longer) granted, vs. everything else
@@ -762,8 +793,28 @@ mod imp {
                                 } else {
                                     crate::diag::clear_last_error();
                                 }
+                                // Where the time went, from key-up to the text being pasted.
+                                let timings = whimpr_core::stats::Timings {
+                                    stop_ms,
+                                    resample_ms,
+                                    asr_ms,
+                                    cleanup_ms,
+                                    review_ms,
+                                    paste_ms,
+                                    total_ms: ms_since(key_up_at),
+                                };
+                                eprintln!(
+                                    "[whimpr] timings (ms): stop {} resample {} asr {} cleanup {} review {} paste {} total {}",
+                                    timings.stop_ms,
+                                    timings.resample_ms,
+                                    timings.asr_ms,
+                                    timings.cleanup_ms,
+                                    timings.review_ms,
+                                    timings.paste_ms,
+                                    timings.total_ms
+                                );
                                 // Log words + speaking time for the Hub stats (WPM, streak…).
-                                record_dictation(&text, res.duration_secs());
+                                record_dictation(&text, res.duration_secs(), timings);
                                 // Watch the field for a post-paste correction to learn (✨).
                                 crate::autolearn::watch_correction(&text);
                             } else if was_real_attempt {
@@ -821,6 +872,7 @@ mod imp {
                 let was_down = FN_IS_DOWN.swap(down, Ordering::SeqCst);
                 let at_ms = now_ms();
                 if down && !was_down {
+                    mark_stop_trigger();
                     eprintln!("[whimpr] Fn DOWN");
                     // Snapshot the paste target now, while the user's app is focused.
                     let target = crate::appctx::frontmost_bundle_id();
@@ -830,6 +882,7 @@ mod imp {
                         at_ms,
                     }));
                 } else if !down && was_down {
+                    mark_stop_trigger();
                     eprintln!("[whimpr] Fn UP");
                     handle_input(Input::Trigger(TriggerToken::Up {
                         binding: BindingId::PushToTalk,

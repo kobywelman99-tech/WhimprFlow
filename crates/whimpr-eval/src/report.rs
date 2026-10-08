@@ -8,8 +8,12 @@ use whimpr_core::stats::percentile;
 pub struct Timings {
     pub resample_ms: u32,
     pub asr_ms: u32,
-    /// Everything after recognition: mishear fix, cleanup, gates, sense check.
-    pub pipeline_ms: u32,
+    /// The cleanup call (0 when it didn't run).
+    #[serde(default)]
+    pub cleanup_ms: u32,
+    /// The sense check (0 when it didn't run).
+    #[serde(default)]
+    pub review_ms: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,8 +132,8 @@ impl Report {
     /// The table, plus what recognition produced and what would be pasted for each clip.
     pub fn render(&self, show_text: bool) -> String {
         let mut out = format!(
-            "{:<30} {:<15} {:>7} {:>8} {:>7} {:>7}\n",
-            "fixture", "category", "raw WER", "cleaned", "asr ms", "pipe ms"
+            "{:<30} {:<15} {:>7} {:>8} {:>7} {:>8} {:>9}\n",
+            "fixture", "category", "raw WER", "cleaned", "asr ms", "clean ms", "review ms"
         );
         for r in &self.results {
             let wer = r.raw_wer.map_or("-".into(), |w| format!("{w:.2}"));
@@ -140,11 +144,14 @@ impl Report {
                 (_, Some(false), _) => pass_label(r, "FAIL"),
                 (_, None, _) => "-".to_string(),
             };
-            let (asr, pipe) = (
-                if r.skipped_silent || r.status != Status::Ok { "-".into() } else { r.timings.asr_ms.to_string() },
-                if r.pipeline_ran { r.timings.pipeline_ms.to_string() } else { "-".into() },
-            );
-            out.push_str(&format!("{:<30} {:<15} {:>7} {:>8} {:>7} {:>7}\n", r.id, r.category, wer, cleaned, asr, pipe));
+            let ms_or_dash = |shown: bool, ms: u32| if shown && ms > 0 { ms.to_string() } else { "-".into() };
+            let asr = ms_or_dash(!r.skipped_silent && r.status == Status::Ok, r.timings.asr_ms);
+            let clean = ms_or_dash(r.pipeline_ran, r.timings.cleanup_ms);
+            let review = ms_or_dash(r.pipeline_ran, r.timings.review_ms);
+            out.push_str(&format!(
+                "{:<30} {:<15} {:>7} {:>8} {:>7} {:>8} {:>9}\n",
+                r.id, r.category, wer, cleaned, asr, clean, review
+            ));
             for reason in &r.reasons {
                 out.push_str(&format!("    ↳ {reason}\n"));
             }
@@ -168,8 +175,15 @@ impl Report {
             if s.unapproved_goldens > 0 { format!(" ({} golden texts not yet approved)", s.unapproved_goldens) } else { String::new() },
         ));
         out.push_str(&format!(
-            "latency ms  p50: resample {} asr {} pipeline {}   p95: resample {} asr {} pipeline {}\n",
-            s.p50.resample_ms, s.p50.asr_ms, s.p50.pipeline_ms, s.p95.resample_ms, s.p95.asr_ms, s.p95.pipeline_ms
+            "latency ms  p50: resample {} asr {} cleanup {} review {}   p95: resample {} asr {} cleanup {} review {}\n",
+            s.p50.resample_ms,
+            s.p50.asr_ms,
+            s.p50.cleanup_ms,
+            s.p50.review_ms,
+            s.p95.resample_ms,
+            s.p95.asr_ms,
+            s.p95.cleanup_ms,
+            s.p95.review_ms
         ));
         out
     }
@@ -192,8 +206,14 @@ fn summarize(results: &[FixtureResult]) -> Summary {
             p,
         )
         .unwrap_or(0),
-        pipeline_ms: percentile(
-            &ran.iter().filter(|r| r.pipeline_ran).map(|r| r.timings.pipeline_ms).collect::<Vec<_>>(),
+        // As in the app, a stage that didn't run isn't a fast zero.
+        cleanup_ms: percentile(
+            &ran.iter().map(|r| r.timings.cleanup_ms).filter(|&ms| ms > 0).collect::<Vec<_>>(),
+            p,
+        )
+        .unwrap_or(0),
+        review_ms: percentile(
+            &ran.iter().map(|r| r.timings.review_ms).filter(|&ms| ms > 0).collect::<Vec<_>>(),
             p,
         )
         .unwrap_or(0),
@@ -231,11 +251,13 @@ pub fn compare(before: &Report, after: &Report) -> String {
     out.push_str("latency p50:\n");
     out.push_str(&delta_ms("resample", b.p50.resample_ms, a.p50.resample_ms));
     out.push_str(&delta_ms("asr", b.p50.asr_ms, a.p50.asr_ms));
-    out.push_str(&delta_ms("pipeline", b.p50.pipeline_ms, a.p50.pipeline_ms));
+    out.push_str(&delta_ms("cleanup", b.p50.cleanup_ms, a.p50.cleanup_ms));
+    out.push_str(&delta_ms("review", b.p50.review_ms, a.p50.review_ms));
     out.push_str("latency p95:\n");
     out.push_str(&delta_ms("resample", b.p95.resample_ms, a.p95.resample_ms));
     out.push_str(&delta_ms("asr", b.p95.asr_ms, a.p95.asr_ms));
-    out.push_str(&delta_ms("pipeline", b.p95.pipeline_ms, a.p95.pipeline_ms));
+    out.push_str(&delta_ms("cleanup", b.p95.cleanup_ms, a.p95.cleanup_ms));
+    out.push_str(&delta_ms("review", b.p95.review_ms, a.p95.review_ms));
 
     let mut regressions = Vec::new();
     let mut improvements = Vec::new();
@@ -275,7 +297,7 @@ mod tests {
             cleaned_pass: pass,
             pipeline_ran: true,
             approved: true,
-            timings: Timings { resample_ms: 1, asr_ms: asr, pipeline_ms: pipe },
+            timings: Timings { resample_ms: 1, asr_ms: asr, cleanup_ms: pipe, review_ms: 0 },
             ..FixtureResult::blank(id, "c", Status::Ok)
         }
     }
@@ -302,7 +324,8 @@ mod tests {
         assert_eq!((s.cleaned_checked, s.cleaned_passed, s.unapproved_goldens), (3, 2, 0));
         // Silent clips never reached recognition or the pipeline, so they don't drag latency down.
         assert_eq!((s.p50.asr_ms, s.p95.asr_ms), (100, 300));
-        assert_eq!((s.p50.pipeline_ms, s.p95.pipeline_ms), (1000, 2000));
+        assert_eq!((s.p50.cleanup_ms, s.p95.cleanup_ms), (1000, 2000));
+        assert_eq!(s.p50.review_ms, 0, "no review ran");
     }
 
     #[test]

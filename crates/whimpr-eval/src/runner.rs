@@ -134,7 +134,7 @@ fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx) -> anyhow::Result<FixtureResult
 
     // Cleanup is repeated `runs` times: it is the only nondeterministic stage.
     let runs = ctx.cfg.runs.max(1);
-    let (mut passes, mut pipeline_total) = (0u32, 0u64);
+    let (mut passes, mut cleanup_total, mut review_total) = (0u32, 0u64, 0u64);
     let mut checked = false;
     for i in 0..runs {
         let env = Env {
@@ -144,9 +144,9 @@ fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx) -> anyhow::Result<FixtureResult
             app_bundle_id: None,
             providers: ctx.providers,
         };
-        let started = Instant::now();
         let out = pipeline::run(&raw, &env);
-        pipeline_total += u64::from(ms(started));
+        cleanup_total += u64::from(out.cleanup_ms);
+        review_total += u64::from(out.review_ms);
         if i == 0 {
             result.text = out.text.clone();
         }
@@ -159,7 +159,8 @@ fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx) -> anyhow::Result<FixtureResult
             }
         }
     }
-    result.timings.pipeline_ms = (pipeline_total / runs as u64) as u32;
+    result.timings.cleanup_ms = (cleanup_total / runs as u64) as u32;
+    result.timings.review_ms = (review_total / runs as u64) as u32;
     if checked {
         result.cleaned_pass = Some(passes as usize == runs);
         result.pass_runs = Some((passes, runs as u32));

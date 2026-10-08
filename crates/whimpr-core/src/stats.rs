@@ -18,6 +18,52 @@ const TYPING_WPM_BASELINE: f64 = 45.0;
 
 const DAY_SECS: i64 = 86_400;
 
+/// Where the time went for one dictation, in milliseconds, measured from the key-up.
+/// All zero means "not measured" (records from before timings existed).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Timings {
+    /// Key-up until the microphone is stopped and the audio is in hand.
+    pub stop_ms: u32,
+    pub resample_ms: u32,
+    /// Speech recognition.
+    pub asr_ms: u32,
+    /// The cleanup call (0 when cleanup didn't run).
+    pub cleanup_ms: u32,
+    /// The sense check (0 when it didn't run).
+    pub review_ms: u32,
+    pub paste_ms: u32,
+    /// Key-up until the text is pasted.
+    pub total_ms: u32,
+}
+
+impl Timings {
+    /// Stage name and value, in pipeline order.
+    pub fn stages(&self) -> [(&'static str, u32); 7] {
+        [
+            ("stop", self.stop_ms),
+            ("resample", self.resample_ms),
+            ("asr", self.asr_ms),
+            ("cleanup", self.cleanup_ms),
+            ("review", self.review_ms),
+            ("paste", self.paste_ms),
+            ("total", self.total_ms),
+        ]
+    }
+}
+
+/// p50 and p95 of one stage over recent dictations. `n` counts the dictations where
+/// the stage ran (a stage that didn't run, such as cleanup in Raw mode, isn't a zero).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageLatency {
+    pub stage: String,
+    pub p50_ms: u32,
+    pub p95_ms: u32,
+    pub n: u32,
+}
+
+/// How many of the most recent measured dictations the latency summary looks at.
+pub const LATENCY_WINDOW: usize = 200;
+
 /// One completed dictation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -36,6 +82,9 @@ pub struct SessionRecord {
     /// Bundle id of the app the text was inserted into, if known.
     #[serde(default)]
     pub app: Option<String>,
+    /// Where the time went. Older records predate this and read as all zero.
+    #[serde(default)]
+    pub timings: Timings,
 }
 
 /// A history row for the Hub Home list (newest first). Trimmed view of a record.
@@ -72,6 +121,9 @@ pub struct StatsSummary {
     pub time_saved_secs: f64,
     /// Words per local day, oldest first; index 6 is today, 0 is six days ago.
     pub last7_words: [u64; 7],
+    /// p50/p95 per pipeline stage over the last [`LATENCY_WINDOW`] measured dictations.
+    #[serde(default)]
+    pub latency: Vec<StageLatency>,
 }
 
 /// Nearest-rank percentile (`p` in 0–100) of `values`; `None` if there are none.
@@ -121,7 +173,7 @@ impl StatsStore {
         std::fs::write(path, serde_json::to_string_pretty(self).unwrap_or_default())
     }
 
-    /// Append one completed dictation.
+    /// Append one completed dictation, without timings.
     pub fn record(
         &mut self,
         words: u32,
@@ -131,7 +183,38 @@ impl StatsStore {
         text: String,
         app: Option<String>,
     ) {
-        self.sessions.push(SessionRecord { ts_unix, words, duration_ms, chars, text, app });
+        self.push(SessionRecord { ts_unix, words, duration_ms, chars, text, app, timings: Timings::default() });
+    }
+
+    /// Append one completed dictation, including where its time went.
+    pub fn push(&mut self, record: SessionRecord) {
+        self.sessions.push(record);
+    }
+
+    /// p50/p95 per stage over the last [`LATENCY_WINDOW`] dictations that were measured.
+    pub fn latency(&self) -> Vec<StageLatency> {
+        let recent: Vec<Timings> = self
+            .sessions
+            .iter()
+            .rev()
+            .map(|s| s.timings)
+            .filter(|t| t.total_ms > 0)
+            .take(LATENCY_WINDOW)
+            .collect();
+        Timings::default()
+            .stages()
+            .iter()
+            .enumerate()
+            .map(|(i, (stage, _))| {
+                let ran: Vec<u32> = recent.iter().map(|t| t.stages()[i].1).filter(|&ms| ms > 0).collect();
+                StageLatency {
+                    stage: stage.to_string(),
+                    p50_ms: percentile(&ran, 50.0).unwrap_or(0),
+                    p95_ms: percentile(&ran, 95.0).unwrap_or(0),
+                    n: ran.len() as u32,
+                }
+            })
+            .collect()
     }
 
     /// The most recent `limit` dictations, newest first, for the Home history list.
@@ -220,12 +303,74 @@ impl StatsStore {
             day_streak,
             time_saved_secs,
             last7_words,
+            latency: self.latency(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    fn timed(total: u32, asr: u32, cleanup: u32) -> SessionRecord {
+        SessionRecord {
+            ts_unix: 1,
+            words: 3,
+            duration_ms: 1000,
+            chars: 10,
+            text: "a b c".into(),
+            app: None,
+            timings: Timings { stop_ms: 5, resample_ms: 1, asr_ms: asr, cleanup_ms: cleanup, review_ms: 0, paste_ms: 210, total_ms: total },
+        }
+    }
+
+    #[test]
+    fn latency_is_p50_p95_per_stage_and_skips_stages_that_did_not_run() {
+        let mut s = StatsStore::default();
+        for i in 1..=100u32 {
+            // Cleanup only ran for the first 50 dictations.
+            s.push(timed(1000 + i, i, if i <= 50 { i * 10 } else { 0 }));
+        }
+        let lat = s.latency();
+        let by = |name: &str| lat.iter().find(|l| l.stage == name).unwrap().clone();
+        assert_eq!(lat.len(), 7);
+        let asr = by("asr");
+        assert_eq!((asr.p50_ms, asr.p95_ms, asr.n), (50, 95, 100));
+        let cleanup = by("cleanup");
+        assert_eq!((cleanup.p50_ms, cleanup.p95_ms, cleanup.n), (250, 480, 50));
+        let review = by("review");
+        assert_eq!((review.p50_ms, review.n), (0, 0), "a stage that never ran has no latency, not a fast one");
+        assert_eq!(by("total").p95_ms, 1095);
+    }
+
+    #[test]
+    fn unmeasured_records_are_ignored_and_old_files_still_load() {
+        let old = r#"{"sessions":[{"ts_unix":1,"words":2,"duration_ms":900,"chars":9}]}"#;
+        let s: StatsStore = serde_json::from_str(old).unwrap();
+        assert_eq!(s.sessions[0].timings, Timings::default());
+        assert!(s.latency().iter().all(|l| l.n == 0));
+        assert_eq!(s.summary(0, 100).total_words, 2);
+        // And the summary round-trips with the new field.
+        let json = serde_json::to_string(&s.summary(0, 100)).unwrap();
+        assert!(json.contains("\"latency\""));
+    }
+
+    #[test]
+    fn only_the_most_recent_dictations_count() {
+        let mut s = StatsStore::default();
+        for _ in 0..LATENCY_WINDOW {
+            s.push(timed(100, 100, 0));
+        }
+        // 200 older, slower ones should have been pushed out of the window.
+        let mut slow = StatsStore::default();
+        for _ in 0..50 {
+            slow.push(timed(9000, 9000, 0));
+        }
+        for r in s.sessions.drain(..) {
+            slow.push(r);
+        }
+        let asr = slow.latency().into_iter().find(|l| l.stage == "asr").unwrap();
+        assert_eq!((asr.p95_ms, asr.n), (100, LATENCY_WINDOW as u32));
+    }
+
     #[test]
     fn percentile_is_nearest_rank() {
         let v: Vec<u32> = (1..=100).collect();

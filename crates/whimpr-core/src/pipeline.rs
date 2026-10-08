@@ -6,6 +6,8 @@
 //! The shell owns everything with side effects: logging, user-facing notices, style
 //! learning, timing and paste. It reads [`Output`] to know what to tell the user.
 
+use std::time::Instant;
+
 use crate::brain::Brain;
 use crate::cleanup::{self, CleanupContext, CleanupProvider, GateReason, GateVerdict};
 use crate::dictionary::DictionaryStore;
@@ -67,6 +69,14 @@ pub struct Output {
     pub text: String,
     pub cleanup: CleanupStep,
     pub review: ReviewStep,
+    /// Time spent in the cleanup call, in milliseconds (0 when it didn't run).
+    pub cleanup_ms: u32,
+    /// Time spent in the sense check, in milliseconds (0 when it didn't run).
+    pub review_ms: u32,
+}
+
+fn elapsed_ms(since: Instant) -> u32 {
+    since.elapsed().as_millis().min(u128::from(u32::MAX)) as u32
 }
 
 /// Rewrite known mishears: the dictionary's "also heard as" entries, then word pairs
@@ -84,7 +94,13 @@ pub fn run(raw: &str, env: &Env) -> Output {
     let level = settings.cleanup_level;
     // Nothing was said: don't spend a model call on it.
     if raw.trim().is_empty() || matches!(settings.cleanup_mode, CleanupMode::Raw) || level.bypasses_llm() {
-        return Output { text: raw.to_string(), cleanup: CleanupStep::Skipped, review: ReviewStep::NotRun };
+        return Output {
+            text: raw.to_string(),
+            cleanup: CleanupStep::Skipped,
+            review: ReviewStep::NotRun,
+            cleanup_ms: 0,
+            review_ms: 0,
+        };
     }
 
     // Turn explicit spoken layout cues ("new line", "new paragraph") into break markers
@@ -105,6 +121,7 @@ pub fn run(raw: &str, env: &Env) -> Output {
 
     // The selected provider, falling back to the local model when a cloud key is
     // missing (so cleanup still runs). Local mode uses the local model directly.
+    let cleanup_started = Instant::now();
     let local = || env.providers.local.map(|p| p.cleanup(&raw_norm, &ctx));
     let result = match settings.cleanup_mode {
         CleanupMode::OpenAi => env.providers.openai.map(|p| p.cleanup(&raw_norm, &ctx)).or_else(local),
@@ -113,6 +130,7 @@ pub fn run(raw: &str, env: &Env) -> Output {
         CleanupMode::Raw => None,
     };
 
+    let cleanup_ms = if result.is_some() { elapsed_ms(cleanup_started) } else { 0 };
     let (draft, cleanup) = match result {
         Some(Ok(cleaned)) => {
             // Deterministic safety net: leftover layout cues become real line breaks,
@@ -127,8 +145,10 @@ pub fn run(raw: &str, env: &Env) -> Output {
         None => (raw_out, CleanupStep::Unavailable { local: matches!(settings.cleanup_mode, CleanupMode::Local) }),
     };
 
+    let review_started = Instant::now();
     let (text, review) = sense_check(raw, draft, env);
-    Output { text, cleanup, review }
+    let review_ms = if matches!(review, ReviewStep::NotRun) { 0 } else { elapsed_ms(review_started) };
+    Output { text, cleanup, review, cleanup_ms, review_ms }
 }
 
 /// The last read: does the message make sense? Cloud models only (the on-device model
@@ -223,6 +243,32 @@ mod tests {
             assert_eq!(out.review, ReviewStep::NotRun);
         }
         assert_eq!(p.count(), 0, "nothing is sent anywhere");
+    }
+
+    #[test]
+    fn time_spent_in_each_model_call_is_reported() {
+        struct Slow(u64);
+        impl CleanupProvider for Slow {
+            fn id(&self) -> ProviderId {
+                ProviderId::Anthropic
+            }
+            fn complete(&self, messages: &[CleanupMsg]) -> anyhow::Result<String> {
+                std::thread::sleep(std::time::Duration::from_millis(self.0));
+                // The second call is the sense check; answer "fine".
+                let is_review = messages.first().is_some_and(|m| m.content.contains("last check"));
+                Ok(if is_review { "<ok/>".into() } else { "Send it tomorrow please.".into() })
+            }
+        }
+        let dict = DictionaryStore::default();
+        let slow = Slow(30);
+        let s = settings(CleanupMode::Anthropic, CleanupLevel::Light, true);
+        let out = run("send it tomorrow please", &env(&s, &dict, Providers { anthropic: Some(&slow), ..Providers::default() }));
+        assert!(out.cleanup_ms >= 30 && out.review_ms >= 30, "{} {}", out.cleanup_ms, out.review_ms);
+
+        // Skipped stages cost nothing and say so.
+        let raw = settings(CleanupMode::Raw, CleanupLevel::Light, true);
+        let out = run("send it tomorrow please", &env(&raw, &dict, Providers::default()));
+        assert_eq!((out.cleanup_ms, out.review_ms), (0, 0));
     }
 
     #[test]
