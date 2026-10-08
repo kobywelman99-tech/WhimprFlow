@@ -204,10 +204,10 @@ pub fn start(app: AppHandle, id: &str) -> Result<(), String> {
             Ok(()) => {
                 // Put a new whisper model to work now, without a restart where the platform
                 // allows. Parakeet is opt-in: downloading it doesn't switch to it.
-                let in_use = spec.id != PARAKEET_ID
-                    || crate::hotkey::current_settings().asr_engine == AsrEngineId::OnnxParakeet;
+                let wanted = crate::hotkey::current_settings().asr_engine;
+                let in_use = spec.id != PARAKEET_ID || wanted == AsrEngineId::OnnxParakeet;
                 let note = if in_use {
-                    match crate::hotkey::reload_asr_model() {
+                    match crate::hotkey::reload_asr_model(wanted) {
                         Ok(true) => None,
                         Ok(false) => Some("Restart WhimprFlow to start using it.".to_string()),
                         Err(e) => Some(format!("It downloaded, but couldn't be loaded: {e}")),

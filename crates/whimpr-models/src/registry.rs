@@ -137,6 +137,31 @@ pub fn best_whisper_model(dir: &Path) -> Option<PathBuf> {
     WHISPER_PREFERENCE.iter().map(|f| dir.join(f)).find(|p| p.exists())
 }
 
+/// Which speech engine to load, and from where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Choice {
+    Parakeet { dir: PathBuf },
+    /// `fell_back` is true when Parakeet was asked for but isn't usable.
+    Whisper { path: PathBuf, fell_back: bool },
+    /// No model installed; `expected` is where the default one would go.
+    Nothing { expected: PathBuf },
+}
+
+/// Decide what to load from what is installed under `dir`. Parakeet only if it is asked for and
+/// complete; otherwise the best whisper model; otherwise nothing. A missing Parakeet never
+/// leaves dictation without an engine while whisper is there.
+pub fn choose_engine(want_parakeet: bool, dir: &Path) -> Choice {
+    if want_parakeet {
+        if let Some(parakeet) = parakeet_dir(dir) {
+            return Choice::Parakeet { dir: parakeet };
+        }
+    }
+    match best_whisper_model(dir) {
+        Some(path) => Choice::Whisper { path, fell_back: want_parakeet },
+        None => Choice::Nothing { expected: dir.join("ggml-base.en.bin") },
+    }
+}
+
 /// The Parakeet model's folder, if all its files are installed under `dir`.
 pub fn parakeet_dir(dir: &Path) -> Option<PathBuf> {
     let spec = builtin().into_iter().find(|m| m.id == PARAKEET_ID)?;
@@ -145,6 +170,52 @@ pub fn parakeet_dir(dir: &Path) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    // ── Which engine to load ──
+
+    fn install_whisper(dir: &Path) {
+        std::fs::write(dir.join("ggml-base.en.bin"), b"x").unwrap();
+    }
+
+    fn install_parakeet(dir: &Path) {
+        let spec = builtin().into_iter().find(|m| m.id == PARAKEET_ID).unwrap();
+        let folder = spec.install_dir(dir);
+        std::fs::create_dir_all(&folder).unwrap();
+        for f in &spec.files {
+            std::fs::File::create(folder.join(&f.name)).unwrap().set_len(f.size_bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn whisper_is_chosen_unless_parakeet_is_asked_for_and_installed() {
+        let dir = temp("choose-whisper");
+        install_whisper(&dir);
+        install_parakeet(&dir);
+        assert_eq!(choose_engine(false, &dir), Choice::Whisper { path: dir.join("ggml-base.en.bin"), fell_back: false });
+    }
+
+    #[test]
+    fn parakeet_is_chosen_when_asked_for_and_installed() {
+        let dir = temp("choose-parakeet");
+        install_whisper(&dir);
+        install_parakeet(&dir);
+        let folder = builtin().into_iter().find(|m| m.id == PARAKEET_ID).unwrap().install_dir(&dir);
+        assert_eq!(choose_engine(true, &dir), Choice::Parakeet { dir: folder });
+    }
+
+    #[test]
+    fn asking_for_parakeet_without_it_falls_back_to_whisper_and_says_so() {
+        let dir = temp("choose-fallback");
+        install_whisper(&dir);
+        assert_eq!(choose_engine(true, &dir), Choice::Whisper { path: dir.join("ggml-base.en.bin"), fell_back: true });
+    }
+
+    #[test]
+    fn with_nothing_installed_there_is_no_engine_to_load() {
+        let dir = temp("choose-none");
+        assert_eq!(choose_engine(false, &dir), Choice::Nothing { expected: dir.join("ggml-base.en.bin") });
+        assert_eq!(choose_engine(true, &dir), Choice::Nothing { expected: dir.join("ggml-base.en.bin") });
+    }
+
     use super::*;
 
     fn temp(tag: &str) -> PathBuf {

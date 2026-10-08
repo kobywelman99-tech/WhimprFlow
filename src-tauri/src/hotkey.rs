@@ -196,37 +196,52 @@ mod imp {
         }
     }
 
-    /// Load the chosen speech engine, warm it, and put it in use, replacing any engine already
-    /// running (in-flight dictations finish on the old one). Parakeet if it is chosen and
-    /// installed; otherwise, or if it can't load, the best installed whisper model, so a missing
-    /// or broken Parakeet never leaves dictation without an engine. `Ok(true)` means the engine
-    /// is live now; macOS always can.
-    pub fn reload_asr_model() -> Result<bool, String> {
-        let dir = models_dir();
-        if current_settings().asr_engine == whimpr_core::AsrEngineId::OnnxParakeet {
-            match whimpr_models::parakeet_dir(&dir) {
-                Some(parakeet) => match whimpr_asr_parakeet::ParakeetEngine::load(&parakeet) {
-                    Ok(engine) => {
-                        publish_engine(Arc::new(engine), "Parakeet");
-                        return Ok(true);
-                    }
-                    Err(e) => eprintln!("[whimpr] Parakeet couldn't load ({e}); using whisper instead"),
-                },
-                None => eprintln!("[whimpr] Parakeet is chosen but not downloaded; using whisper instead"),
+    /// Load the speech engine `wanted`, warm it, and put it in use, replacing any engine already
+    /// running (in-flight dictations finish on the old one). The choice of files is
+    /// `whimpr_models::choose_engine`: Parakeet if asked for and complete, otherwise the best
+    /// whisper model, so a missing or broken Parakeet never leaves dictation without an engine.
+    /// `Ok(true)` means the engine is live now; macOS always can.
+    ///
+    /// The engine is passed in rather than read from the settings so that it cannot be read
+    /// before they are loaded (which is how it once ignored the choice at launch).
+    pub fn reload_asr_model(wanted: whimpr_core::AsrEngineId) -> Result<bool, String> {
+        use whimpr_models::Choice;
+        let want_parakeet = wanted == whimpr_core::AsrEngineId::OnnxParakeet;
+        let mut choice = whimpr_models::choose_engine(want_parakeet, &models_dir());
+        if let Choice::Parakeet { dir } = &choice {
+            match whimpr_asr_parakeet::ParakeetEngine::load(dir) {
+                Ok(engine) => {
+                    publish_engine(Arc::new(engine), "Parakeet");
+                    return Ok(true);
+                }
+                Err(e) => {
+                    eprintln!("[whimpr] Parakeet couldn't load ({e}); using whisper instead");
+                    choice = match whimpr_models::best_whisper_model(&models_dir()) {
+                        Some(path) => Choice::Whisper { path, fell_back: true },
+                        None => Choice::Nothing { expected: model_path() },
+                    };
+                }
             }
         }
-        let path = model_path();
-        if !path.exists() {
-            ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
-            return Err(format!("no speech model found at {}", path.display()));
+        match choice {
+            Choice::Whisper { path, fell_back } => {
+                if fell_back {
+                    eprintln!("[whimpr] Parakeet is chosen but isn't available; using whisper instead");
+                }
+                let engine = whimpr_asr::WhisperEngine::load(&path).map_err(|e| {
+                    ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
+                    e.to_string()
+                })?;
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                publish_engine(Arc::new(engine), &format!("model {name}"));
+                Ok(true)
+            }
+            Choice::Nothing { expected } => {
+                ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
+                Err(format!("no speech model found at {}", expected.display()))
+            }
+            Choice::Parakeet { .. } => unreachable!("handled above"),
         }
-        let engine = whimpr_asr::WhisperEngine::load(&path).map_err(|e| {
-            ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
-            e.to_string()
-        })?;
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        publish_engine(Arc::new(engine), &format!("model {name}"));
-        Ok(true)
     }
 
     fn support_dir() -> PathBuf {
@@ -483,8 +498,9 @@ mod imp {
         // A different speech engine loads in the background; dictation keeps using the old one
         // until the new one is warm.
         if new.asr_engine != previous_engine {
-            std::thread::spawn(|| {
-                if let Err(e) = reload_asr_model() {
+            let wanted = new.asr_engine;
+            std::thread::spawn(move || {
+                if let Err(e) = reload_asr_model(wanted) {
                     eprintln!("[whimpr] switching the speech engine failed: {e}");
                 }
             });
@@ -1006,19 +1022,6 @@ mod imp {
             Err(e) => eprintln!("[whimpr] voice-activity model unavailable ({e}); recordings go to recognition whole"),
         });
 
-        // Load the speech-to-text model off the main thread (it takes ~1s).
-        std::thread::spawn(|| {
-            let path = model_path();
-            if !path.exists() {
-                eprintln!("[whimpr] ASR model not found at {}", path.display());
-                ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
-                return;
-            }
-            if let Err(e) = reload_asr_model() {
-                eprintln!("[whimpr] ASR model load failed: {e}");
-            }
-        });
-
         // Load settings + dictionary, and build cloud providers from stored keys.
         let settings = whimpr_core::Settings::load(&settings_path());
         let dict = whimpr_core::DictionaryStore::load(&dict_path());
@@ -1026,7 +1029,19 @@ mod imp {
             "[whimpr] cleanup mode: {:?}, level: {:?}",
             settings.cleanup_mode, settings.cleanup_level
         );
+        let wanted_engine = settings.asr_engine;
         let _ = SETTINGS.set(Mutex::new(settings));
+
+        // Load the speech-to-text model off the main thread (it takes ~1s). After the settings
+        // are loaded: the engine to load depends on them.
+        std::thread::spawn(move || {
+            if !model_path().exists() && whimpr_models::parakeet_dir(&models_dir()).is_none() {
+                eprintln!("[whimpr] ASR model not found at {}", model_path().display());
+            }
+            if let Err(e) = reload_asr_model(wanted_engine) {
+                eprintln!("[whimpr] ASR model load failed: {e}");
+            }
+        });
         let _ = DICTIONARY.set(Mutex::new(dict));
         let _ = BRAIN.set(Mutex::new(whimpr_core::brain::Brain::load(&brain_path())));
         let _ = STATS.set(Mutex::new(whimpr_core::StatsStore::load(&stats_path())));
@@ -1171,7 +1186,7 @@ mod other {
     pub fn models_dir() -> std::path::PathBuf {
         std::path::PathBuf::new()
     }
-    pub fn reload_asr_model() -> Result<bool, String> {
+    pub fn reload_asr_model(_wanted: whimpr_core::AsrEngineId) -> Result<bool, String> {
         Ok(false)
     }
     pub fn brain_learn(_pairs: Vec<(String, String)>) {}

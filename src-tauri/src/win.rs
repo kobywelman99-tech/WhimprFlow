@@ -620,7 +620,7 @@ pub fn models_dir() -> std::path::PathBuf {
 
 /// The Windows engine is loaded once at launch and can't be swapped yet, so a model
 /// downloaded now is used after a restart. `Ok(false)` tells the UI to say so.
-pub fn reload_asr_model() -> Result<bool, String> {
+pub fn reload_asr_model(_wanted: whimpr_core::AsrEngineId) -> Result<bool, String> {
     Ok(false)
 }
 
