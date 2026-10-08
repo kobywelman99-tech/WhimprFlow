@@ -1,0 +1,19 @@
+[package]
+name = "whimpr-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Runs recorded clips through the same ASR -> mishear fix -> cleanup -> gates ->
+# sense check path the app uses and reports accuracy and per-stage latency, so a
+# change can be judged by numbers before and after.
+[dependencies]
+whimpr-core = { path = "../whimpr-core" }
+whimpr-asr = { path = "../whimpr-asr" }
+whimpr-audio = { path = "../whimpr-audio" }
+whimpr-cleanup = { path = "../whimpr-cleanup" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hound = "3"

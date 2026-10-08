@@ -102,7 +102,7 @@ impl DictionaryStore {
         if rules.is_empty() {
             return text.to_string();
         }
-        rules.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        rules.sort_by_key(|r| std::cmp::Reverse(r.0.len()));
 
         let spans = word_spans(text);
         let lower: Vec<String> = spans.iter().map(|&(a, b)| text[a..b].to_lowercase()).collect();

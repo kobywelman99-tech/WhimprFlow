@@ -82,7 +82,8 @@ pub fn fix_mishears(raw: &str, dictionary: Option<&DictionaryStore>, brain: Opti
 pub fn run(raw: &str, env: &Env) -> Output {
     let settings = env.settings;
     let level = settings.cleanup_level;
-    if matches!(settings.cleanup_mode, CleanupMode::Raw) || level.bypasses_llm() {
+    // Nothing was said: don't spend a model call on it.
+    if raw.trim().is_empty() || matches!(settings.cleanup_mode, CleanupMode::Raw) || level.bypasses_llm() {
         return Output { text: raw.to_string(), cleanup: CleanupStep::Skipped, review: ReviewStep::NotRun };
     }
 
@@ -222,6 +223,19 @@ mod tests {
             assert_eq!(out.review, ReviewStep::NotRun);
         }
         assert_eq!(p.count(), 0, "nothing is sent anywhere");
+    }
+
+    #[test]
+    fn an_empty_transcript_never_reaches_a_provider() {
+        let dict = DictionaryStore::default();
+        let p = Fake::new(&[]);
+        let s = settings(CleanupMode::OpenAi, CleanupLevel::Light, true);
+        for empty in ["", "   ", "\n"] {
+            let out = run(empty, &env(&s, &dict, cloud(&p)));
+            assert_eq!(out.cleanup, CleanupStep::Skipped);
+            assert_eq!(out.review, ReviewStep::NotRun);
+        }
+        assert_eq!(p.count(), 0);
     }
 
     #[test]

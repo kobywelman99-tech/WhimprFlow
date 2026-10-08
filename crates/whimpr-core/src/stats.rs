@@ -74,6 +74,18 @@ pub struct StatsSummary {
     pub last7_words: [u64; 7],
 }
 
+/// Nearest-rank percentile (`p` in 0–100) of `values`; `None` if there are none.
+/// With 100 values, p95 is the 95th smallest.
+pub fn percentile(values: &[u32], p: f64) -> Option<u32> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let rank = ((p.clamp(0.0, 100.0) / 100.0) * sorted.len() as f64).ceil() as usize;
+    sorted.get(rank.max(1) - 1).copied()
+}
+
 /// Count whitespace-delimited words. Matches how the cleanup layer thinks of words.
 pub fn count_words(text: &str) -> u32 {
     text.split_whitespace().count() as u32
@@ -214,6 +226,19 @@ impl StatsStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn percentile_is_nearest_rank() {
+        let v: Vec<u32> = (1..=100).collect();
+        assert_eq!(percentile(&v, 50.0), Some(50));
+        assert_eq!(percentile(&v, 95.0), Some(95));
+        assert_eq!(percentile(&v, 100.0), Some(100));
+        assert_eq!(percentile(&v, 0.0), Some(1));
+        // Unsorted input, small sets, and the empty case.
+        assert_eq!(percentile(&[30, 10, 20], 50.0), Some(20));
+        assert_eq!(percentile(&[7], 95.0), Some(7));
+        assert_eq!(percentile(&[], 50.0), None);
+    }
+
     use super::*;
 
     // A fixed "now": 2021-01-08 12:00:00 UTC.

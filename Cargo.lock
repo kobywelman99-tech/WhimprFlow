@@ -5256,6 +5256,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "whimpr-eval"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "hound",
+ "serde",
+ "serde_json",
+ "whimpr-asr",
+ "whimpr-audio",
+ "whimpr-cleanup",
+ "whimpr-core",
+]
+
+[[package]]
 name = "whimpr-ffi"
 version = "0.1.1"
 dependencies = [

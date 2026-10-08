@@ -79,12 +79,22 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 ### Task 2: Eval harness (`whimpr-eval`)
 **Description:** New crate `crates/whimpr-eval` (`cargo run -p whimpr-eval -- --model … --provider none|anthropic|openai|local`). Reads `eval/fixtures/manifest.json` + WAVs, runs the same steps as the app (`hound` read → `resample_to_16k` → whisper with the eval dictionary's `vocab_prompt` → `pipeline::run`), and reports: WER on the raw transcript against `expected_raw`; per-fixture pass/fail on the cleaned text (normalized WER ≤ `max_wer`, plus `must_contain` / `must_not_contain` and `expect: "no_output"` for silence); per-stage latency (resample, ASR, cleanup, review). Writes `eval/reports/<timestamp>.json` and prints a table; `--baseline report.json` prints deltas. Also `--list-missing` and a generated `eval/RECORDING.md` with the script (Appendix A).
 **Acceptance criteria:**
-- [ ] Pure scoring code (normalize, WER, pass/fail, percentile, delta) unit-tested
-- [ ] Runs end to end on generated synthetic WAVs (silence, tone) with `--provider none`, proving the plumbing
-- [ ] Missing clips are listed, not silently skipped
-- [ ] `eval/RECORDING.md` gives you the exact sentence per clip and naming (`NN-category-slug.wav`, 16 kHz mono preferred, any rate accepted)
-- [ ] Golden `expected_cleaned` for LLM-dependent clips is set after the first real run, reviewed and approved by you
+- [x] Pure scoring code (normalize, WER, pass/fail, percentile, delta) unit-tested
+- [x] Runs end to end on generated synthetic WAVs (silence, tone) with `--provider none`, proving the plumbing
+- [x] Missing clips are listed, not silently skipped
+- [x] `eval/RECORDING.md` gives you the exact sentence per clip and naming (`NN-category-slug.wav`, 16 kHz mono preferred, any rate accepted)
+- [ ] Golden `expected_cleaned` for LLM-dependent clips is set after the first real run, reviewed and approved by you (drafted in the manifest, all marked `approved: false`)
 **Verification:** `cargo test -p whimpr-eval`; `cargo run -p whimpr-eval -- --provider none` on synthetic clips; **Koby:** record the ~30 clips (Appendix A) into `eval/fixtures/`
+
+**Progress:**
+- [x] `whimpr-eval` crate: `manifest` (fixtures, dictionary, per-clip `max_wer` / `must_contain` / `expect: no_output`), `score` (normalize with filler removal, WER, verdicts), `runner` (WAV in any format → resample → silence gate → whisper with the dictionary prompt → `pipeline::fix_mishears` → `pipeline::run`), `report` (table, JSON, `--baseline` deltas, regressions), `recording`, `synth`. 24 tests, including the full flow with a fake recogniser and a hallucination-on-noise case
+- [x] `eval/fixtures/manifest.json` (30 clips from Appendix A, with recording notes) and generated `eval/RECORDING.md`
+- [x] Shared bits added to core: `stats::percentile` (Task 3 reuses it) and "an empty transcript never reaches a provider" in `pipeline::run`
+- [x] Verified with the **real whisper `base.en`** on synthetic clips and on 10 clips made with macOS `say`: WER and latency come out, silence is skipped. **These are plumbing checks only, not a baseline** (a synthetic voice, not yours)
+- [x] **Finding for Task 4:** whisper.cpp returns *nothing* for clips under 1 s ("input is too short - 990 ms < 1000 ms"). A quick "yes" or "okay" is silently dropped in the app today. Fix in Task 4: pad short clips with silence
+- [ ] `--provider local` and `--engine …` are not wired yet (local needs Task 5's supervisor, engines need Task 6/8); cloud providers are wired but untested here (no key used)
+- [ ] Koby: record the 30 clips into `eval/fixtures/` (`cargo run -p whimpr-eval -- --list-missing` shows what's left), then run `cargo run --release -p whimpr-eval -- --provider anthropic --show-text`, review the output, approve the golden texts, and save the first report as the baseline
+
 **Dependencies:** T1 · **Files:** `crates/whimpr-eval/**`, `eval/fixtures/manifest.json`, `eval/RECORDING.md`, `Cargo.toml` · **Scope:** L
 *Honest limit: no real WER or latency numbers exist until your clips are recorded. The first run on them is the "before" for everything after.*
 
@@ -100,6 +110,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 
 ### Task 4: Silero VAD (trim + skip silence)
 **Description:** Pure policy in `whimpr-core/src/audio_gate.rs`: given per-32 ms speech probabilities, decide `Skip(reason)` or `Trim { start, end }` (threshold 0.5, ~150 ms pad, minimum speech ~250 ms; push-to-talk so release is the endpoint). New crate `whimpr-vad` runs Silero (MIT, ~2 MB, `include_bytes!` so no download) via `vad-rs`/ort. Run before whisper in `hotkey.rs`; skip ASR on silence-only (no paste, no error pill unless `was_real_attempt`); trim edges otherwise. Defense in depth: set whisper `no_speech_thold`, and drop known hallucination outputs ("Thank you.", "you", "[BLANK_AUDIO]") only when the clip's speech ratio is very low.
+**Also (found in Task 2):** pad clips shorter than 1 s with trailing silence before whisper, because whisper.cpp returns nothing for them today (a quick "yes" is dropped). Add a policy test and an eval clip check (25, 26, 27).
 **Spike first (4a):** confirm `vad-rs`/`ort` builds on this toolchain (workspace `rust-version` is 1.82; ort rc may need more, so bump and say so), downloads its runtime, and costs < ~10 ms per clip. If not, fall back to a pure-Rust Silero via `tract`, or stop and ask.
 **Acceptance criteria:**
 - [ ] Policy unit tests: silence → Skip; short noise burst → Skip; speech with long lead/tail → Trim with padding; speech-only unchanged; very short real word kept
