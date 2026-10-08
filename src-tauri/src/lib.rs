@@ -368,6 +368,12 @@ fn download_model(app: tauri::AppHandle, id: String) -> Result<(), String> {
     models::start(app, &id)
 }
 
+/// Switch the speech engine to an installed model (Parakeet, or back to whisper).
+#[tauri::command]
+fn use_model(id: String) -> Result<(), String> {
+    models::use_model(&id)
+}
+
 /// Stop the running download. The part already fetched is kept for next time.
 #[tauri::command]
 fn cancel_model_download() -> bool {
@@ -509,6 +515,7 @@ pub fn run() {
             list_models,
             download_model,
             cancel_model_download,
+            use_model,
             request_microphone,
             request_accessibility,
             request_input_monitoring,

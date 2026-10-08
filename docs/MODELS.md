@@ -33,7 +33,31 @@ What the downloader does for you:
   finishes on the model it started with.
 - Never re-downloads a model that is already there.
 
-If more than one model is installed, the most accurate present one is used, in this order:
+### Parakeet (experimental, optional)
+
+An alternative recogniser from NVIDIA, available under **Settings ▸ Speech model** (about 660 MB,
+four files in `models/parakeet-tdt-0.6b-v2-int8/`). It runs on the CPU, so it needs no GPU.
+On Apple Silicon it is roughly twice as fast as the Best whisper model and adds its own
+punctuation and capitalisation. Trade-offs, which is why it is opt-in:
+
+- **It can't use your dictionary to hear names.** Whisper is told your words in advance;
+  Parakeet isn't, so "Manvi" may come out as "man V". The "also heard as" entries and the
+  learned voice patterns still fix such mishears afterwards.
+- It keeps filler words ("um", "uh") that whisper drops; Cleanup removes them.
+- It can occasionally return nothing for a very short, abruptly-started clip. When the voice
+  detector heard real speech but Parakeet returned nothing, WhimprFlow retries once on the
+  whole recording.
+- English only.
+
+Download it, then press **Use**. Switching takes a few seconds in the background, and **Use** on
+a whisper model switches back. If Parakeet can't load, WhimprFlow falls back to whisper instead
+of leaving you without dictation.
+
+Model: NVIDIA Parakeet TDT 0.6B v2, ONNX export by istupakov, licensed
+[CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/); source
+<https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx> (revision `0bbb45a3`).
+
+If more than one whisper model is installed, the most accurate present one is used, in this order:
 `ggml-large-v3-turbo.bin`, `ggml-medium.en.bin`, `ggml-small.en.bin`, `ggml-base.en.bin`.
 
 **Windows** doesn't use the downloader yet; place the file by hand (below), then restart.

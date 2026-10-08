@@ -1,0 +1,16 @@
+[package]
+name = "whimpr-asr-parakeet"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# NVIDIA Parakeet TDT 0.6B v2 (English) on the CPU through ONNX Runtime, behind whimpr-core's
+# AsrEngine trait. Uses transcribe-rs, which shares one ONNX Runtime with the VAD crate.
+[dependencies]
+whimpr-core = { path = "../whimpr-core" }
+anyhow = { workspace = true }
+transcribe-rs = { version = "0.3.12", default-features = false, features = ["onnx"] }
+
+[dev-dependencies]
+whimpr-models = { path = "../whimpr-models" }

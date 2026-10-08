@@ -8,13 +8,13 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::registry::ModelSpec;
+use crate::registry::{ModelFile, ModelSpec};
 
 /// How often a blocked read wakes up to check for cancellation and for a stall.
 const POLL: Duration = Duration::from_millis(250);
@@ -87,44 +87,69 @@ fn content_range_start(header: &str) -> Option<u64> {
     header.strip_prefix("bytes ")?.split('-').next()?.trim().parse().ok()
 }
 
-/// Download `spec` into `dir`, returning the path of the verified model. `cancel` is checked
-/// continuously; set it from another thread to stop (the partial file is kept).
+/// Download every file of `spec` under `models_dir` (in the model's own folder, if it has
+/// one). Files already installed at the right size are skipped; one progress bar covers the
+/// whole model. If a file fails, the files already finished are kept for the next try.
+/// `cancel` is checked continuously; set it from another thread to stop (partial files are kept).
 pub fn download(
     spec: &ModelSpec,
+    models_dir: &Path,
+    options: &Options,
+    cancel: &AtomicBool,
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<(), DownloadError> {
+    let dir = spec.install_dir(models_dir);
+    let total = spec.total_bytes();
+    let mut finished = 0;
+    for file in &spec.files {
+        download_file(file, &dir, options, cancel, &mut |p| match p {
+            Progress::Downloading { downloaded, .. } => on_progress(Progress::Downloading { downloaded: finished + downloaded, total }),
+            Progress::Verifying => on_progress(Progress::Verifying),
+            Progress::Done => {}
+        })?;
+        finished += file.size_bytes;
+    }
+    on_progress(Progress::Done);
+    Ok(())
+}
+
+fn download_file(
+    file: &ModelFile,
     dir: &Path,
     options: &Options,
     cancel: &AtomicBool,
     on_progress: &mut dyn FnMut(Progress),
-) -> Result<PathBuf, DownloadError> {
+) -> Result<(), DownloadError> {
     std::fs::create_dir_all(dir).map_err(DownloadError::from_io)?;
-    let final_path = dir.join(&spec.file_name);
-    let part_path = dir.join(format!("{}.part", spec.file_name));
+    let final_path = dir.join(&file.name);
+    let part_path = dir.join(format!("{}.part", file.name));
 
     // Already installed at the right size: nothing to do.
-    if std::fs::metadata(&final_path).is_ok_and(|m| m.len() == spec.size_bytes) {
+    if std::fs::metadata(&final_path).is_ok_and(|m| m.len() == file.size_bytes) {
+        on_progress(Progress::Downloading { downloaded: file.size_bytes, total: file.size_bytes });
         on_progress(Progress::Done);
-        return Ok(final_path);
+        return Ok(());
     }
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| DownloadError::Io(e.to_string()))?;
-    runtime.block_on(fetch(spec, &part_path, options, cancel, on_progress))?;
+    runtime.block_on(fetch(file, &part_path, options, cancel, on_progress))?;
 
     on_progress(Progress::Verifying);
     let actual = sha256_of(&part_path).map_err(DownloadError::from_io)?;
-    if actual != spec.sha256.to_lowercase() {
+    if actual != file.sha256.to_lowercase() {
         let _ = std::fs::remove_file(&part_path);
-        return Err(DownloadError::HashMismatch { expected: spec.sha256.clone(), actual });
+        return Err(DownloadError::HashMismatch { expected: file.sha256.clone(), actual });
     }
     std::fs::rename(&part_path, &final_path).map_err(DownloadError::from_io)?;
     on_progress(Progress::Done);
-    Ok(final_path)
+    Ok(())
 }
 
 async fn fetch(
-    spec: &ModelSpec,
+    spec: &ModelFile,
     part: &Path,
     options: &Options,
     cancel: &AtomicBool,

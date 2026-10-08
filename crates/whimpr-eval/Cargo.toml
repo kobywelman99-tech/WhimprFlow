@@ -11,6 +11,7 @@ license.workspace = true
 [dependencies]
 whimpr-core = { path = "../whimpr-core" }
 whimpr-asr = { path = "../whimpr-asr" }
+whimpr-asr-parakeet = { path = "../whimpr-asr-parakeet" }
 whimpr-audio = { path = "../whimpr-audio" }
 whimpr-cleanup = { path = "../whimpr-cleanup" }
 whimpr-vad = { path = "../whimpr-vad" }

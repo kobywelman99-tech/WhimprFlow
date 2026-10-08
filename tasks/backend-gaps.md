@@ -212,10 +212,24 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 **Description:** **Spike (8a):** confirm `transcribe-rs` (onnx only, `ort =2.0.0-rc.12`) builds here, fetch the Parakeet v2 int8 files (~670 MB), and time it on this Mac's CPU. **Build (8b):** `crates/whimpr-asr-parakeet` implements `AsrEngine` (`AsrEngineId::OnnxParakeet`); `Settings.asr_engine`; registry entries in T7 (CC-BY-4.0 attribution added to the app's licenses). **Benchmark (8c):** `whimpr-eval --engine whisper:base.en|whisper:large-v3-turbo|parakeet` and a comparison table recorded in this file.
 **Known trade-offs to carry into the table:** Parakeet has no `initial_prompt`, so the dictionary biasing only works through `fix_mishears` and the cleanup prompt; CoreML EP won't help (research doc); the research docs disagree on Mac (ort CPU ~550-700 ms vs FluidAudio ANE ~150-250 ms), so on **macOS the default stays whisper** and Parakeet is opt-in.
 **Acceptance criteria:**
-- [ ] Parakeet transcribes the eval set; WER and per-stage latency tabulated next to both whisper models
-- [ ] Engine selectable in Settings; switching swaps the engine live
-- [ ] **Windows default is not flipped** until you run the eval on a Windows machine (blocked item below)
+- [x] Parakeet transcribes the eval set; WER and per-stage latency tabulated next to both whisper models
+- [x] Engine selectable in Settings; switching swaps the engine live (via the "Use" button on the model card; not clicked through here)
+- [x] **Windows default is not flipped** until you run the eval on a Windows machine (blocked item below)
 **Verification:** `cargo test -p whimpr-asr-parakeet` (loading errors, empty input), the eval table, **Koby (Windows, later):** run `whimpr-eval` there and send the report
+
+**Progress:**
+- [x] **Spike 8a:** `transcribe-rs` (onnx only) builds here on the same `ort` rc.13 as the VAD. Parakeet v2 int8 on this Mac's CPU decodes the 11 s JFK clip in about 245 ms (45x real time). Model card confirms CC-BY-4.0
+- [x] `whimpr-models` now handles multi-file models (`ModelSpec { folder, files }`, one progress bar across files, files already present skipped, a failed file keeps the finished ones, installed only when every file is full size). Parakeet is registered as four files pinned to Hugging Face revision `0bbb45a3`; **run for real**: all four downloaded with matching hashes (661 MB) and the engine decodes from the downloaded folder. 16 download tests, 4 registry tests
+- [x] `whimpr-asr-parakeet`: `ParakeetEngine` behind `AsrEngine` (`OnnxParakeet`), warm-up, ignores the prompt, serialises the live preview and the final decode. 4 tests for everything that needs no model (a test that the engine's required files equal the downloader's files, mutation-checked after I caught my first version being a tautology)
+- [x] `Settings.asr_engine` (default whisper; old settings files load), `reload_asr_model` chooses the engine and falls back to whisper if Parakeet is missing or won't load, a changed setting reloads in the background, `use_model` command, "Use" button on the model card. Downloading Parakeet does not switch to it
+- [x] **Found by the benchmark and fixed:** with the gate's trimming and padding, Parakeet returned nothing for the one-word "yes" clip (unpadded or padded 2 s it was right; 0.5 s and 1.1 s were not). The clip is TTS with no lead-in, so how much applies to real microphone audio is unknown. Added `transcribe_robust` (retry once on the whole recording when the detector heard speech and the engine returned nothing); used by the app and the eval; mutation-checked. Mean WER 0.169 -> 0.063
+- [x] `whimpr-eval --engine whisper|parakeet --model --parakeet-dir` runs any engine through the identical pipeline
+- [ ] **Benchmark below is on a synthetic voice (macOS `say`) plus the public-domain JFK clip, not yours.** Re-run on your recordings before deciding anything: `cargo run --release -p whimpr-eval -- --engine parakeet --provider anthropic` and the same with `--engine whisper --model <file>`
+- [ ] Koby: Windows `cargo check`; the Windows engine can't be swapped yet, so Parakeet there needs the shared pipeline first
+- [ ] Open before release: NVIDIA Parakeet is CC-BY-4.0 and needs attribution in the app's acknowledgements (added to the existing item)
+
+**Decision for Koby (from the numbers, not made for you):** on this Mac Parakeet is about 6x faster than Best (turbo) at the p50 and close in accuracy, but weaker with names (no dictionary prompt) and a little brittle on one-word clips. The plan keeps whisper as the default and Parakeet opt-in; say if you want that changed after you have run it on your own voice.
+
 **Dependencies:** T6, T7, T2 · **Files:** `crates/whimpr-asr-parakeet/**`, `settings.rs`, `src-tauri/src/hotkey.rs`, `SettingsPane.tsx` · **Scope:** L
 
 ### Checkpoint 1
@@ -295,7 +309,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 **Dependencies:** all phases · **Files:** `CLAUDE.md`, `docs/BUILD-STATUS.md`, `README.md`, `docs/SPEC.md` · **Scope:** S
 
 ### Open before any release (found in code review)
-- [ ] **Acknowledgements:** the shipped desktop and iOS apps must show the licences of bundled third-party data: Silero VAD (MIT, `crates/whimpr-vad/models/LICENSE-SILERO`) and CMUdict (BSD-style, `crates/whimpr-core/data/CMUDICT-LICENSE`, whose binary-redistribution clause requires reproducing its notice). A screen or file in the app, not just the repo
+- [ ] **Acknowledgements:** the shipped desktop and iOS apps must show the licences of bundled third-party data: NVIDIA Parakeet TDT 0.6B v2 (CC-BY-4.0, attribution required; downloaded by the user, not bundled), Silero VAD (MIT, `crates/whimpr-vad/models/LICENSE-SILERO`) and CMUdict (BSD-style, `crates/whimpr-core/data/CMUDICT-LICENSE`, whose binary-redistribution clause requires reproducing its notice). A screen or file in the app, not just the repo
 - [ ] **Word-frequency data licence is unresolved.** `crates/whimpr-core/data/wordfreq.txt` comes from Norvig's `count_1w.txt`; his MIT grant covers his *code*, and the data is described only as derived from the Google Web Trillion Word Corpus via the LDC. Earlier notes in this file and in commit messages called it MIT; that was not verified and should be read as unresolved. It feeds the voice brain's word prior, and removing it would need a replacement (e.g. counts computed from CC0 text such as Common Voice's sentences). **Decision (Koby, 2026-10-07): keep it for now; revisit before any release**
 - [x] Eval recordings and reports are now git-ignored (`eval/fixtures/*.wav`, `eval/reports/`); the manifest and the recording script stay tracked
 
@@ -385,4 +399,14 @@ Numbers from `whimpr-eval`. **Until Koby's 30 clips exist, the only data is a sm
 | Task 4 follow-up | VAD start 0.3 / continue 0.2 / blip 4 frames; one-word hallucination entries removed | 8 `say` one-word clips + the smoke set | words: 0.125 mean (the "ok" row is my reference saying "ok" vs whisper's "Okay") | "bye", "you", "no" were skipped before; now "Bye." "You." "No." Silence, room tone and noise still skipped; earlier smoke-set WER unchanged at 0.075 |
 | Task 6 | swappable engine trait (no behavior change) | smoke set vs the commit just before | 0.075 → 0.075 | 13/13 transcripts identical; ASR p50 63 → 63 ms. Warm-up: first decode ~99 → ~92 ms on base.en (noise-level) |
 | Task 7 | models measured while verifying downloads | jfk.wav (11 s), M-series Metal | n/a | steady-state decode: base.en ~90 ms, large-v3-turbo ~470 ms. Warm-up: base.en 99 -> 92 ms, turbo 533 -> 471 ms |
+
+**Three-engine benchmark (Task 8)**, 22 clips (10 TTS sentences, 8 TTS one-word clips, 3 silent/noise, JFK), `--provider none`, VAD on, Apple Silicon, same pipeline for all:
+
+| Engine | Mean raw WER | ASR p50 | ASR p95 (the 11 s JFK clip) | Notes |
+|---|---|---|---|---|
+| Whisper base.en ("Fast") | 0.039 | 59 ms | 92 ms | uses the dictionary prompt |
+| Whisper large-v3-turbo ("Best") | 0.028 | 421 ms | 478 ms | uses the dictionary prompt |
+| Parakeet v2 int8 (CPU) | 0.063 | 64 ms | 243 ms | no prompt: "man V" / "charge B" for the dictionary-name clip (WER 0.80 there); keeps fillers and punctuates |
+
+Before the empty-answer retry, Parakeet's mean WER was 0.169 (the one-word "yes" clips came back empty). The JFK clip alone: base ~90 ms, Parakeet ~245 ms, turbo ~470 ms.
 

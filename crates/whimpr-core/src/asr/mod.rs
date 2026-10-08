@@ -95,6 +95,32 @@ impl AsrSlot {
     }
 }
 
+/// Speech shorter than this in a clip the engine returned nothing for is believed (a click or a
+/// breath); longer than this, an empty answer is more likely the engine's quirk than the truth.
+pub const RETRY_MIN_SPEECH_MS: u32 = 150;
+
+/// Transcribe `trimmed` (the clip cut to its speech). Some engines, Parakeet especially, can
+/// come back empty on a very short clip depending on exactly how it was trimmed and padded. If
+/// that happens although the detector heard real speech (`speech_ms`), try once more on
+/// `untrimmed`, the whole recording (padded to the minimum length then, not before, so a long
+/// recording is only copied when this happens). Costs nothing when the first answer is fine.
+pub fn transcribe_robust(
+    engine: &dyn AsrEngine,
+    trimmed: &[f32],
+    untrimmed: &[f32],
+    speech_ms: Option<u32>,
+    options: &AsrOptions,
+) -> anyhow::Result<Transcript> {
+    let first = engine.transcribe_with(trimmed, options)?;
+    let heard_speech = speech_ms.is_some_and(|ms| ms >= RETRY_MIN_SPEECH_MS);
+    if first.text.trim().is_empty() && heard_speech && trimmed.len() != untrimmed.len() {
+        let mut whole = untrimmed.to_vec();
+        crate::audio_gate::pad_for_whisper(&mut whole);
+        return engine.transcribe_with(&whole, options);
+    }
+    Ok(first)
+}
+
 /// Warm `engine` (so the first real dictation isn't the one that pays for the cold start),
 /// then put it in use. A failed warm-up doesn't stop the engine being used; the error is
 /// returned for the caller to log.
@@ -106,6 +132,79 @@ pub fn install(slot: &AsrSlot, engine: Arc<dyn AsrEngine>) -> Option<anyhow::Err
 
 #[cfg(test)]
 mod tests {
+    /// Answers by what it was given: an empty transcript for audio of length `empty_for`,
+    /// otherwise the length as text. Counts calls.
+    struct ByLength {
+        empty_for: usize,
+        calls: AtomicUsize,
+        fail: bool,
+    }
+
+    impl AsrEngine for ByLength {
+        fn id(&self) -> AsrEngineId {
+            AsrEngineId::OnnxParakeet
+        }
+
+        fn transcribe(&self, pcm: &[f32]) -> anyhow::Result<Transcript> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                anyhow::bail!("model error");
+            }
+            let text = if pcm.len() == self.empty_for { String::new() } else { format!("heard {}", pcm.len()) };
+            Ok(Transcript { text, confidence: None })
+        }
+    }
+
+    fn by_length(empty_for: usize) -> ByLength {
+        ByLength { empty_for, calls: AtomicUsize::new(0), fail: false }
+    }
+
+    #[test]
+    fn a_normal_answer_is_used_as_is_with_one_call() {
+        let engine = by_length(0);
+        let out = transcribe_robust(&engine, &[0.0; 100], &[0.0; 300], Some(900), &AsrOptions::default()).unwrap();
+        assert_eq!(out.text, "heard 100");
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_empty_answer_despite_real_speech_is_retried_on_the_untrimmed_audio() {
+        let engine = by_length(100); // empty for the trimmed clip only
+        let out = transcribe_robust(&engine, &[0.0; 100], &[0.0; 300], Some(300), &AsrOptions::default()).unwrap();
+        // The retry gets the whole recording, padded up to the length whisper accepts.
+        assert_eq!(out.text, format!("heard {}", crate::audio_gate::MIN_WHISPER_SAMPLES));
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn an_empty_answer_with_little_speech_is_believed() {
+        let engine = by_length(100);
+        let out = transcribe_robust(&engine, &[0.0; 100], &[0.0; 300], Some(60), &AsrOptions::default()).unwrap();
+        assert_eq!(out.text, "");
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1, "a click isn't worth a second decode");
+        // And when no detector ran there is no evidence of speech either.
+        let out = transcribe_robust(&engine, &[0.0; 100], &[0.0; 300], None, &AsrOptions::default()).unwrap();
+        assert_eq!(out.text, "");
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 2, "one more call, no retry");
+    }
+
+    #[test]
+    fn there_is_no_retry_when_the_audio_would_be_the_same() {
+        let engine = by_length(100);
+        let same = [0.0; 100];
+        let out = transcribe_robust(&engine, &same, &same, Some(900), &AsrOptions::default()).unwrap();
+        assert_eq!(out.text, "");
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_engine_error_is_reported_not_retried() {
+        let engine = ByLength { empty_for: 0, calls: AtomicUsize::new(0), fail: true };
+        let err = transcribe_robust(&engine, &[0.0; 100], &[0.0; 300], Some(900), &AsrOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("model error"));
+        assert_eq!(engine.calls.load(Ordering::SeqCst), 1);
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 

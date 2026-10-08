@@ -185,10 +185,36 @@ mod imp {
         support_dir().join("models")
     }
 
-    /// Load the best installed speech model, warm it, and put it in use, replacing any engine
-    /// already running (in-flight dictations finish on the old one). `Ok(true)` means it is
-    /// live now; macOS always can.
+    /// Warm `engine`, put it in use (which also clears "model missing"), and log it.
+    fn publish_engine(engine: Arc<dyn whimpr_core::AsrEngine>, name: &str) {
+        let started = Instant::now();
+        let warmup_error = whimpr_core::asr::install(&ASR, engine);
+        ASR_MODEL_MISSING.store(false, Ordering::SeqCst);
+        match warmup_error {
+            None => eprintln!("[whimpr] ASR {name} loaded and warmed ({} ms) — ready to transcribe", ms_since(started)),
+            Some(e) => eprintln!("[whimpr] ASR {name} loaded; warm-up failed ({e}) — ready to transcribe"),
+        }
+    }
+
+    /// Load the chosen speech engine, warm it, and put it in use, replacing any engine already
+    /// running (in-flight dictations finish on the old one). Parakeet if it is chosen and
+    /// installed; otherwise, or if it can't load, the best installed whisper model, so a missing
+    /// or broken Parakeet never leaves dictation without an engine. `Ok(true)` means the engine
+    /// is live now; macOS always can.
     pub fn reload_asr_model() -> Result<bool, String> {
+        let dir = models_dir();
+        if current_settings().asr_engine == whimpr_core::AsrEngineId::OnnxParakeet {
+            match whimpr_models::parakeet_dir(&dir) {
+                Some(parakeet) => match whimpr_asr_parakeet::ParakeetEngine::load(&parakeet) {
+                    Ok(engine) => {
+                        publish_engine(Arc::new(engine), "Parakeet");
+                        return Ok(true);
+                    }
+                    Err(e) => eprintln!("[whimpr] Parakeet couldn't load ({e}); using whisper instead"),
+                },
+                None => eprintln!("[whimpr] Parakeet is chosen but not downloaded; using whisper instead"),
+            }
+        }
         let path = model_path();
         if !path.exists() {
             ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
@@ -198,16 +224,8 @@ mod imp {
             ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
             e.to_string()
         })?;
-        // Warm it up first, so the first dictation isn't the one that pays for the cold start,
-        // then put it in use (which also clears "model missing").
-        let started = Instant::now();
-        let warmup_error = whimpr_core::asr::install(&ASR, Arc::new(engine));
-        ASR_MODEL_MISSING.store(false, Ordering::SeqCst);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        match warmup_error {
-            None => eprintln!("[whimpr] ASR model {name} loaded and warmed ({} ms) — ready to transcribe", ms_since(started)),
-            Some(e) => eprintln!("[whimpr] ASR model {name} loaded; warm-up failed ({e}) — ready to transcribe"),
-        }
+        publish_engine(Arc::new(engine), &format!("model {name}"));
         Ok(true)
     }
 
@@ -456,11 +474,21 @@ mod imp {
     }
     /// Apply new settings and rebuild the cloud providers (picks up model changes).
     pub fn update_settings(new: whimpr_core::Settings) {
+        let previous_engine = current_settings().asr_engine;
         if let Some(m) = SETTINGS.get() {
             *m.lock_recover() = new.clone();
         }
         let _ = new.save(&settings_path());
         rebuild_providers();
+        // A different speech engine loads in the background; dictation keeps using the old one
+        // until the new one is warm.
+        if new.asr_engine != previous_engine {
+            std::thread::spawn(|| {
+                if let Err(e) = reload_asr_model() {
+                    eprintln!("[whimpr] switching the speech engine failed: {e}");
+                }
+            });
+        }
         if let Some(Some(local)) = LOCAL.get() {
             local.set_timeout(std::time::Duration::from_millis(u64::from(new.local_llm_timeout_ms)));
             // Choosing Local mode starts the model if it isn't running (a no-op if it is).
@@ -785,7 +813,7 @@ mod imp {
                         whimpr_core::audio_gate::gate(&pcm, detector, &whimpr_core::audio_gate::GatePolicy::default())
                     };
                     let vad_ms = ms_since(vad_started);
-                    let (pcm, speech_ms) = match gated {
+                    let (trimmed, speech_ms) = match gated {
                         whimpr_core::audio_gate::Gated::Skip(_) => {
                             eprintln!("[whimpr] no speech heard ({vad_ms} ms) — nothing to transcribe");
                             if was_real_attempt {
@@ -798,7 +826,10 @@ mod imp {
                     };
 
                     let asr_started = Instant::now();
-                    let transcribed = asr.transcribe_with(&pcm, &asr_options());
+                    // If the engine comes back empty on the trimmed clip although speech was heard,
+                    // it tries once more on the whole recording.
+                    let transcribed =
+                        whimpr_core::asr::transcribe_robust(asr.as_ref(), &trimmed, &pcm, speech_ms, &asr_options());
                     let asr_ms = ms_since(asr_started);
                     match transcribed {
                         Ok(mut t) => {

@@ -136,7 +136,8 @@ fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx<'_, '_>) -> anyhow::Result<Fixtu
             }
             Gated::Audio { pcm: audio, speech_ms } => {
                 let started = Instant::now();
-                let text = ctx.asr.transcribe_with(&audio, &AsrOptions { prompt: ctx.prompt.clone() })?.text;
+                let options = AsrOptions { prompt: ctx.prompt.clone() };
+                let text = whimpr_core::asr::transcribe_robust(ctx.asr, &audio, &pcm, speech_ms, &options)?.text;
                 result.timings.asr_ms = ms(started);
                 // Whisper's stock phrase for "nothing was said", on audio with next to no speech.
                 if speech_ms.is_some_and(|ms| audio_gate::is_hallucination(&text, ms)) { String::new() } else { text }

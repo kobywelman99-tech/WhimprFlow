@@ -28,6 +28,8 @@ export interface Settings {
   review_enabled: boolean;
   // Longest an on-device cleanup request may take before the raw transcript is pasted.
   local_llm_timeout_ms: number;
+  // Which speech recogniser is used: whisper (default) or Parakeet (opt-in, needs its model).
+  asr_engine: "whisper_cpp" | "onnx_parakeet" | "fluid_audio_ane";
 }
 
 // Mirrors `permissions::Grant` in src-tauri. A bare boolean couldn't tell
@@ -114,6 +116,7 @@ export const DEFAULT_SETTINGS: Settings = {
   format_mode: "auto",
   review_enabled: true,
   local_llm_timeout_ms: 3000,
+  asr_engine: "whisper_cpp",
 };
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -194,6 +197,8 @@ export interface ModelInfo {
   installed: boolean;
   // This is the model speech recognition is using.
   active: boolean;
+  // Installed, not in use, and can be switched to now (Parakeet <-> whisper).
+  selectable: boolean;
   downloading: boolean;
 }
 
@@ -218,6 +223,10 @@ export async function listModels(): Promise<ModelInfo[]> {
 
 export async function downloadModel(id: string): Promise<void> {
   await invoke<void>("download_model", { id });
+}
+
+export async function useModel(id: string): Promise<void> {
+  await invoke<void>("use_model", { id });
 }
 
 export async function cancelModelDownload(): Promise<void> {

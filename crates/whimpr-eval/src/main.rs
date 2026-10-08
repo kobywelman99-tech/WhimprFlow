@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
+use whimpr_core::asr::AsrEngine;
 use whimpr_core::cleanup::CleanupLevel;
 use whimpr_core::pipeline::Providers;
 use whimpr_core::settings::CleanupMode;
@@ -19,7 +20,9 @@ whimpr-eval: run recorded clips through the dictation pipeline and report accura
 USAGE: cargo run -p whimpr-eval [--release] -- [OPTIONS]
 
   --fixtures DIR          clips and manifest.json (default eval/fixtures)
-  --model PATH            whisper model (default: the best one in the app's models folder)
+  --engine E              whisper (default) | parakeet
+  --model PATH            whisper model file (default: the best one in the app's models folder)
+  --parakeet-dir PATH     Parakeet model folder (default: parakeet-tdt-0.6b-v2-int8 in the app's models folder)
   --provider P            none (default; raw transcript only) | anthropic | openai
                           anthropic/openai read ANTHROPIC_API_KEY / OPENAI_API_KEY
   --level L               none | light (default) | medium | high
@@ -39,7 +42,9 @@ USAGE: cargo run -p whimpr-eval [--release] -- [OPTIONS]
 #[derive(Default)]
 struct Args {
     fixtures: Option<PathBuf>,
+    engine: Option<String>,
     model: Option<PathBuf>,
+    parakeet_dir: Option<PathBuf>,
     provider: String,
     level: Option<String>,
     no_review: bool,
@@ -62,7 +67,9 @@ fn parse_args() -> Result<Args> {
         let mut value = |name: &str| it.next().with_context(|| format!("{name} needs a value"));
         match flag.as_str() {
             "--fixtures" => args.fixtures = Some(value("--fixtures")?.into()),
+            "--engine" => args.engine = Some(value("--engine")?),
             "--model" => args.model = Some(value("--model")?.into()),
+            "--parakeet-dir" => args.parakeet_dir = Some(value("--parakeet-dir")?.into()),
             "--provider" => args.provider = value("--provider")?,
             "--level" => args.level = Some(value("--level")?),
             "--no-review" => args.no_review = true,
@@ -194,13 +201,28 @@ fn main() -> Result<()> {
     let providers = Providers { openai: openai.as_deref(), anthropic: anthropic.as_deref(), local: None };
 
     // Recognition.
-    let model_path = args
-        .model
-        .clone()
-        .or_else(default_model)
-        .context("no whisper model found: pass --model PATH or put one in the app's models folder (docs/MODELS.md)")?;
-    eprintln!("loading {} …", model_path.display());
-    let engine = whimpr_asr::WhisperEngine::load(&model_path)?;
+    let (engine, engine_name): (Box<dyn AsrEngine>, String) = match args.engine.as_deref().unwrap_or("whisper") {
+        "whisper" => {
+            let model_path = args
+                .model
+                .clone()
+                .or_else(default_model)
+                .context("no whisper model found: pass --model PATH or put one in the app's models folder (docs/MODELS.md)")?;
+            eprintln!("loading {} …", model_path.display());
+            let name = format!("whisper:{}", model_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+            (Box::new(whimpr_asr::WhisperEngine::load(&model_path)?), name)
+        }
+        "parakeet" => {
+            let dir = args.parakeet_dir.clone().unwrap_or_else(|| models_dir().join("parakeet-tdt-0.6b-v2-int8"));
+            eprintln!("loading {} …", dir.display());
+            (Box::new(whimpr_asr_parakeet::ParakeetEngine::load(&dir)?), "parakeet-tdt-0.6b-v2-int8".to_string())
+        }
+        other => bail!("unknown engine {other} (whisper, parakeet)"),
+    };
+    // The app warms its engine at launch, so the numbers should too.
+    if let Err(e) = engine.warmup() {
+        eprintln!("warm-up failed ({e}); continuing");
+    }
 
     let cfg = Config {
         fixtures_dir: fixtures_dir.clone(),
@@ -222,13 +244,13 @@ fn main() -> Result<()> {
         }
     };
     let detector = silero.as_mut().map(|d| d as &mut dyn whimpr_core::audio_gate::SpeechDetector);
-    let results = runner::run(&manifest, &cfg, &engine, detector, providers);
+    let results = runner::run(&manifest, &cfg, engine.as_ref(), detector, providers);
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let meta = Meta {
         timestamp_unix: now,
         git: git_head(),
-        asr: model_path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        asr: engine_name,
         provider: args.provider.clone(),
         level: args.level.clone().unwrap_or_else(|| "light".into()),
         review: cfg.review,

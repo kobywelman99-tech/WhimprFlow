@@ -7,6 +7,7 @@ import {
   downloadModel,
   listModels,
   onModelProgress,
+  useModel,
   type ModelInfo,
   type ModelProgress,
 } from "./api";
@@ -34,11 +35,13 @@ function Row({
   progress,
   busyElsewhere,
   onDownload,
+  onUse,
 }: {
   model: ModelInfo;
   progress: ModelProgress | undefined;
   busyElsewhere: boolean;
   onDownload: () => void;
+  onUse: () => void;
 }) {
   const live = progress && (progress.state === "downloading" || progress.state === "verifying");
   const failed = progress?.state === "error";
@@ -58,6 +61,10 @@ function Row({
           {live ? (
             <Button variant="ghost" size="sm" onClick={() => void cancelModelDownload()}>
               Cancel
+            </Button>
+          ) : model.selectable ? (
+            <Button variant="ghost" size="sm" onClick={onUse}>
+              Use
             </Button>
           ) : model.installed ? (
             <span style={{ fontSize: 12.5, fontWeight: 600, color: model.active ? theme.accentDeep : theme.textMuted }}>
@@ -134,6 +141,16 @@ export function ModelsCard({ intro, onChanged }: { intro?: string; onChanged?: (
     }
   };
 
+  const use = async (id: string) => {
+    setStartError(null);
+    try {
+      await useModel(id);
+    } catch (e) {
+      setStartError(String(e));
+    }
+    reload();
+  };
+
   return (
     <Card style={{ marginBottom: 16 }}>
       <div style={{ fontSize: 14, fontWeight: 600, color: theme.textStrong, fontFamily: font.ui }}>Speech model</div>
@@ -142,7 +159,14 @@ export function ModelsCard({ intro, onChanged }: { intro?: string; onChanged?: (
           "WhimprFlow listens with a speech model that runs on this Mac. It downloads once, resumes if your connection drops, and is checked before it's used."}
       </div>
       {models.map((m) => (
-        <Row key={m.id} model={m} progress={progress[m.id]} busyElsewhere={busy} onDownload={() => void start(m.id)} />
+        <Row
+          key={m.id}
+          model={m}
+          progress={progress[m.id]}
+          busyElsewhere={busy}
+          onDownload={() => void start(m.id)}
+          onUse={() => void use(m.id)}
+        />
       ))}
       {startError && <div style={{ fontSize: 12.5, color: "#ff6b6b", marginTop: 8 }}>{startError}</div>}
     </Card>

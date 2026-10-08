@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
-use whimpr_models::{download, DownloadError, ModelSpec, Options, Progress, Role};
+use whimpr_models::{download, DownloadError, ModelFile, ModelSpec, Options, Progress, Role};
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -25,10 +25,29 @@ enum Mode {
     HangAfter(usize),
 }
 
+/// The path and `Range` start of each request the server has seen, in order.
+type Hits = Mutex<Vec<(String, Option<u64>)>>;
+
 struct Server {
-    url: String,
+    /// `http://127.0.0.1:port`, no trailing slash.
+    base: String,
+    /// The path and `Range` start of each request, in order.
+    hits: Arc<Hits>,
+}
+
+impl Server {
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
+    }
+
     /// The `Range` start of each request, in order (None when the request had no range).
-    ranges: Arc<Mutex<Vec<Option<u64>>>>,
+    fn ranges(&self) -> Vec<Option<u64>> {
+        self.hits.lock().unwrap().iter().map(|(_, r)| *r).collect()
+    }
+
+    fn requests_for(&self, path: &str) -> usize {
+        self.hits.lock().unwrap().iter().filter(|(p, _)| p == path).count()
+    }
 }
 
 fn payload(len: usize) -> Arc<Vec<u8>> {
@@ -37,21 +56,27 @@ fn payload(len: usize) -> Arc<Vec<u8>> {
     Arc::new((0..len).map(|_| { x ^= x << 13; x ^= x >> 17; x ^= x << 5; (x >> 8) as u8 }).collect())
 }
 
+/// One file at `/model.bin`.
 fn serve(body: Arc<Vec<u8>>, mode: Mode) -> Server {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
-    let ranges = Arc::new(Mutex::new(Vec::new()));
-    let seen = ranges.clone();
-    std::thread::spawn(move || {
-        for conn in listener.incoming().flatten() {
-            let (body, seen) = (body.clone(), seen.clone());
-            std::thread::spawn(move || handle(conn, &body, mode, &seen));
-        }
-    });
-    Server { url, ranges }
+    serve_files(vec![("/model.bin".to_string(), body)], mode)
 }
 
-fn handle(mut conn: TcpStream, body: &[u8], mode: Mode, seen: &Mutex<Vec<Option<u64>>>) {
+fn serve_files(files: Vec<(String, Arc<Vec<u8>>)>, mode: Mode) -> Server {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let hits = Arc::new(Mutex::new(Vec::new()));
+    let seen = hits.clone();
+    let files = Arc::new(files);
+    std::thread::spawn(move || {
+        for conn in listener.incoming().flatten() {
+            let (files, seen) = (files.clone(), seen.clone());
+            std::thread::spawn(move || handle(conn, &files, mode, &seen));
+        }
+    });
+    Server { base, hits }
+}
+
+fn handle(mut conn: TcpStream, files: &[(String, Arc<Vec<u8>>)], mode: Mode, seen: &Hits) {
     let mut request = Vec::new();
     let mut buf = [0u8; 1024];
     while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -62,10 +87,15 @@ fn handle(mut conn: TcpStream, body: &[u8], mode: Mode, seen: &Mutex<Vec<Option<
     }
     let text = String::from_utf8_lossy(&request).to_lowercase();
     let range = text.lines().find_map(|l| l.strip_prefix("range: bytes=")).and_then(|r| r.trim_end_matches('-').trim().parse::<u64>().ok());
+    let path = String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap_or("/").to_string();
     let first = {
         let mut seen = seen.lock().unwrap();
-        seen.push(range);
+        seen.push((path.clone(), range));
         seen.len() == 1
+    };
+    let Some(body) = files.iter().find(|(p, _)| *p == path).map(|(_, b)| b.as_slice()) else {
+        let _ = conn.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
     };
 
     if matches!(mode, Mode::NotFound) {
@@ -115,16 +145,19 @@ fn hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+fn file(name: &str, url: &str, body: &[u8]) -> ModelFile {
+    ModelFile { name: name.into(), url: url.into(), size_bytes: body.len() as u64, sha256: hex(body) }
+}
+
+/// A one-file model, `model.bin`, straight in the models folder (like a whisper model).
 fn spec(server_url: &str, body: &[u8]) -> ModelSpec {
     ModelSpec {
         id: "test".into(),
         title: "Test".into(),
         blurb: String::new(),
-        file_name: "model.bin".into(),
-        url: server_url.into(),
-        size_bytes: body.len() as u64,
-        sha256: hex(body),
         role: Role::Speech,
+        folder: None,
+        files: vec![file("model.bin", server_url, body)],
     }
 }
 
@@ -138,7 +171,7 @@ fn options() -> Options {
     Options { stall_timeout: Duration::from_millis(800), connect_timeout: Duration::from_secs(2) }
 }
 
-fn run(spec: &ModelSpec, dir: &Path, cancel: &AtomicBool) -> (Result<PathBuf, DownloadError>, Vec<Progress>) {
+fn run(spec: &ModelSpec, dir: &Path, cancel: &AtomicBool) -> (Result<(), DownloadError>, Vec<Progress>) {
     let mut events = Vec::new();
     let result = download(spec, dir, &options(), cancel, &mut |p| events.push(p));
     (result, events)
@@ -154,10 +187,10 @@ fn a_download_arrives_verified_with_no_leftovers() {
     let server = serve(body.clone(), Mode::Normal);
     let dir = temp_dir("full");
 
-    let (result, events) = run(&spec(&server.url, &body), &dir, &AtomicBool::new(false));
+    let (result, events) = run(&spec(&server.url("/model.bin"), &body), &dir, &AtomicBool::new(false));
 
-    let path = result.expect("downloads");
-    assert_eq!(std::fs::read(&path).unwrap(), *body);
+    result.expect("downloads");
+    assert_eq!(std::fs::read(dir.join("model.bin")).unwrap(), *body);
     assert!(!part(&dir).exists(), "the .part file is gone");
     // Progress only goes up, ends at the total, then reports verifying and done.
     let downloaded: Vec<u64> = events.iter().filter_map(|e| match e { Progress::Downloading { downloaded, .. } => Some(*downloaded), _ => None }).collect();
@@ -172,7 +205,7 @@ fn a_dropped_connection_keeps_the_partial_file_and_the_next_try_resumes_from_it(
     let body = payload(600_000);
     let server = serve(body.clone(), Mode::CutFirstAt(250_000));
     let dir = temp_dir("resume");
-    let spec = spec(&server.url, &body);
+    let spec = spec(&server.url("/model.bin"), &body);
 
     let (first, _) = run(&spec, &dir, &AtomicBool::new(false));
     assert!(matches!(first, Err(DownloadError::Truncated { got: 250_000, .. })), "{first:?}");
@@ -180,9 +213,9 @@ fn a_dropped_connection_keeps_the_partial_file_and_the_next_try_resumes_from_it(
     assert!(!dir.join("model.bin").exists(), "nothing the app could load yet");
 
     let (second, events) = run(&spec, &dir, &AtomicBool::new(false));
-    let path = second.expect("resumes and finishes");
-    assert_eq!(std::fs::read(path).unwrap(), *body, "the splice is byte-exact");
-    assert_eq!(server.ranges.lock().unwrap().as_slice(), [None, Some(250_000)], "the second request asked only for the rest");
+    second.expect("resumes and finishes");
+    assert_eq!(std::fs::read(dir.join("model.bin")).unwrap(), *body, "the splice is byte-exact");
+    assert_eq!(server.ranges().as_slice(), [None, Some(250_000)], "the second request asked only for the rest");
     assert!(matches!(events[0], Progress::Downloading { downloaded: 250_000, .. }), "progress starts from what it already had");
 }
 
@@ -191,8 +224,8 @@ fn a_file_that_does_not_match_its_hash_is_thrown_away() {
     let body = payload(300_000);
     let server = serve(body.clone(), Mode::Normal);
     let dir = temp_dir("hash");
-    let mut spec = spec(&server.url, &body);
-    spec.sha256 = hex(b"something else entirely");
+    let mut spec = spec(&server.url("/model.bin"), &body);
+    spec.files[0].sha256 = hex(b"something else entirely");
 
     let (result, _) = run(&spec, &dir, &AtomicBool::new(false));
 
@@ -208,9 +241,10 @@ fn a_server_that_ignores_the_range_request_still_gives_a_correct_file() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(part(&dir), &body[..100_000]).unwrap();
 
-    let (result, _) = run(&spec(&server.url, &body), &dir, &AtomicBool::new(false));
+    let (result, _) = run(&spec(&server.url("/model.bin"), &body), &dir, &AtomicBool::new(false));
 
-    assert_eq!(std::fs::read(result.expect("restarts from the beginning")).unwrap(), *body);
+    result.expect("restarts from the beginning");
+    assert_eq!(std::fs::read(dir.join("model.bin")).unwrap(), *body);
 }
 
 #[test]
@@ -218,7 +252,7 @@ fn a_missing_file_is_reported_as_not_found_and_leaves_nothing() {
     let body = payload(1000);
     let server = serve(body.clone(), Mode::NotFound);
     let dir = temp_dir("404");
-    let (result, _) = run(&spec(&server.url, &body), &dir, &AtomicBool::new(false));
+    let (result, _) = run(&spec(&server.url("/model.bin"), &body), &dir, &AtomicBool::new(false));
     assert!(matches!(result, Err(DownloadError::NotFound)), "{result:?}");
     assert!(!dir.join("model.bin").exists() && !part(&dir).exists());
 }
@@ -229,7 +263,7 @@ fn cancelling_stops_promptly_and_keeps_the_partial_file_for_later() {
     let server = serve(body.clone(), Mode::Trickle { chunk: 30_000, gap_ms: 25 });
     let dir = temp_dir("cancel");
     let cancel = AtomicBool::new(false);
-    let spec = spec(&server.url, &body);
+    let spec = spec(&server.url("/model.bin"), &body);
 
     let mut events = 0;
     let result = download(&spec, &dir, &options(), &cancel, &mut |p| {
@@ -248,7 +282,8 @@ fn cancelling_stops_promptly_and_keeps_the_partial_file_for_later() {
 
     // Later, it picks up where it stopped.
     let (resumed, _) = run(&spec, &dir, &AtomicBool::new(false));
-    assert_eq!(std::fs::read(resumed.expect("resumes")).unwrap(), *body);
+    resumed.expect("resumes");
+    assert_eq!(std::fs::read(dir.join("model.bin")).unwrap(), *body);
 }
 
 #[test]
@@ -257,8 +292,9 @@ fn a_slow_trickle_is_not_mistaken_for_a_stall_and_loses_no_data() {
     let body = payload(40_000);
     let server = serve(body.clone(), Mode::Trickle { chunk: 8_000, gap_ms: 400 });
     let dir = temp_dir("trickle");
-    let (result, _) = run(&spec(&server.url, &body), &dir, &AtomicBool::new(false));
-    assert_eq!(std::fs::read(result.expect("completes")).unwrap(), *body, "byte-exact despite the polling");
+    let (result, _) = run(&spec(&server.url("/model.bin"), &body), &dir, &AtomicBool::new(false));
+    result.expect("completes");
+    assert_eq!(std::fs::read(dir.join("model.bin")).unwrap(), *body, "byte-exact despite the polling");
 }
 
 #[test]
@@ -267,7 +303,7 @@ fn a_connection_that_goes_silent_is_reported_as_stalled() {
     let server = serve(body.clone(), Mode::HangAfter(120_000));
     let dir = temp_dir("stall");
     let began = Instant::now();
-    let (result, _) = run(&spec(&server.url, &body), &dir, &AtomicBool::new(false));
+    let (result, _) = run(&spec(&server.url("/model.bin"), &body), &dir, &AtomicBool::new(false));
     assert!(matches!(result, Err(DownloadError::Stalled)), "{result:?}");
     assert!(began.elapsed() < Duration::from_secs(5), "took {:?}", began.elapsed());
     assert!(std::fs::metadata(part(&dir)).unwrap().len() >= 120_000, "what arrived is kept");
@@ -281,10 +317,10 @@ fn an_already_installed_model_is_not_downloaded_again() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("model.bin"), &*body).unwrap();
 
-    let (result, events) = run(&spec(&server.url, &body), &dir, &AtomicBool::new(false));
+    let (result, events) = run(&spec(&server.url("/model.bin"), &body), &dir, &AtomicBool::new(false));
 
-    assert_eq!(result.expect("already there"), dir.join("model.bin"));
-    assert!(server.ranges.lock().unwrap().is_empty(), "no request was made");
+    result.expect("already there");
+    assert!(server.ranges().is_empty(), "no request was made");
     assert!(matches!(events.last(), Some(Progress::Done)));
 }
 
@@ -295,8 +331,9 @@ fn a_leftover_that_is_bigger_than_the_model_is_discarded_not_trusted() {
     let dir = temp_dir("oversize");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(part(&dir), vec![7u8; 80_000]).unwrap();
-    let (result, _) = run(&spec(&server.url, &body), &dir, &AtomicBool::new(false));
-    assert_eq!(std::fs::read(result.expect("starts over")).unwrap(), *body);
+    let (result, _) = run(&spec(&server.url("/model.bin"), &body), &dir, &AtomicBool::new(false));
+    result.expect("starts over");
+    assert_eq!(std::fs::read(dir.join("model.bin")).unwrap(), *body);
 }
 
 #[test]
@@ -325,4 +362,96 @@ fn error_messages_are_written_for_the_person_not_the_programmer() {
     // A full disk is recognised from the OS error, not only from our own messages.
     let full = std::io::Error::from(std::io::ErrorKind::StorageFull);
     assert!(matches!(DownloadError::from_io(full), DownloadError::DiskFull));
+}
+
+// ── Models made of several files (Parakeet: encoder, decoder, preprocessor, vocabulary) ──
+
+fn multi(server: &Server, files: &[(&str, &Arc<Vec<u8>>)]) -> ModelSpec {
+    ModelSpec {
+        id: "multi".into(),
+        title: "Multi".into(),
+        blurb: String::new(),
+        role: Role::Speech,
+        folder: Some("multi-model".into()),
+        files: files.iter().map(|(name, body)| file(name, &server.url(&format!("/{name}")), body)).collect(),
+    }
+}
+
+#[test]
+fn a_model_of_several_files_downloads_into_its_own_folder_with_one_progress_bar() {
+    let (a, b, c) = (payload(300_000), payload(50_000), payload(2_000));
+    let server = serve_files(
+        vec![("/a.onnx".into(), a.clone()), ("/b.onnx".into(), b.clone()), ("/vocab.txt".into(), c.clone())],
+        Mode::Normal,
+    );
+    let dir = temp_dir("multi");
+    let spec = multi(&server, &[("a.onnx", &a), ("b.onnx", &b), ("vocab.txt", &c)]);
+    assert_eq!(spec.total_bytes(), 352_000);
+
+    let (result, events) = run(&spec, &dir, &AtomicBool::new(false));
+    result.expect("downloads all three");
+
+    for (name, body) in [("a.onnx", &a), ("b.onnx", &b), ("vocab.txt", &c)] {
+        assert_eq!(std::fs::read(dir.join("multi-model").join(name)).unwrap(), **body, "{name}");
+    }
+    assert!(spec.is_installed(&dir));
+    // One bar across all files: totals are the whole model, progress never goes backwards and ends at the total.
+    let bars: Vec<(u64, u64)> = events.iter().filter_map(|e| match e { Progress::Downloading { downloaded, total } => Some((*downloaded, *total)), _ => None }).collect();
+    assert!(bars.iter().all(|(_, total)| *total == 352_000));
+    assert!(bars.windows(2).all(|w| w[0].0 <= w[1].0));
+    assert_eq!(bars.last().unwrap().0, 352_000);
+    assert!(matches!(events.last(), Some(Progress::Done)));
+    assert_eq!(events.iter().filter(|e| matches!(e, Progress::Done)).count(), 1, "done is reported once, at the end");
+}
+
+#[test]
+fn files_that_are_already_there_are_not_fetched_again_and_the_rest_are() {
+    let (a, b) = (payload(40_000), payload(30_000));
+    let server = serve_files(vec![("/a.onnx".into(), a.clone()), ("/b.onnx".into(), b.clone())], Mode::Normal);
+    let dir = temp_dir("multi-partial");
+    std::fs::create_dir_all(dir.join("multi-model")).unwrap();
+    std::fs::write(dir.join("multi-model").join("a.onnx"), &*a).unwrap();
+    let spec = multi(&server, &[("a.onnx", &a), ("b.onnx", &b)]);
+    assert!(!spec.is_installed(&dir), "one of two is not a model");
+
+    let (result, events) = run(&spec, &dir, &AtomicBool::new(false));
+
+    result.expect("fetches the missing one");
+    assert_eq!(server.requests_for("/a.onnx"), 0, "the file that was already there");
+    assert_eq!(server.requests_for("/b.onnx"), 1);
+    assert!(spec.is_installed(&dir));
+    // The bar starts with the already-present bytes counted, not from zero.
+    assert!(matches!(events[0], Progress::Downloading { downloaded: 40_000, total: 70_000 }), "{:?}", events[0]);
+}
+
+#[test]
+fn if_one_file_fails_the_model_is_not_installed_but_the_others_are_kept_for_next_time() {
+    let (a, b) = (payload(40_000), payload(30_000));
+    // The server has a.onnx but not b.onnx.
+    let server = serve_files(vec![("/a.onnx".into(), a.clone())], Mode::Normal);
+    let dir = temp_dir("multi-fail");
+    let spec = multi(&server, &[("a.onnx", &a), ("b.onnx", &b)]);
+
+    let (result, _) = run(&spec, &dir, &AtomicBool::new(false));
+
+    assert!(matches!(result, Err(DownloadError::NotFound)), "{result:?}");
+    assert!(!spec.is_installed(&dir), "half a model must not count as installed");
+    assert!(dir.join("multi-model").join("a.onnx").exists(), "the finished file is kept");
+}
+
+#[test]
+fn a_model_is_installed_only_when_every_file_has_the_right_size() {
+    let server = serve_files(vec![], Mode::Normal);
+    let (a, b) = (payload(100), payload(50));
+    let spec = multi(&server, &[("a.onnx", &a), ("b.onnx", &b)]);
+    let dir = temp_dir("installed-check");
+    let folder = dir.join("multi-model");
+    std::fs::create_dir_all(&folder).unwrap();
+    assert!(!spec.is_installed(&dir));
+    std::fs::write(folder.join("a.onnx"), &*a).unwrap();
+    assert!(!spec.is_installed(&dir));
+    std::fs::write(folder.join("b.onnx"), vec![0u8; 10]).unwrap(); // truncated
+    assert!(!spec.is_installed(&dir), "a truncated file doesn't count");
+    std::fs::write(folder.join("b.onnx"), &*b).unwrap();
+    assert!(spec.is_installed(&dir));
 }

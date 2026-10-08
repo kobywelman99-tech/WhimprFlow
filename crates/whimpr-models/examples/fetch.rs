@@ -1,7 +1,7 @@
 //! Download a registry model with the real downloader, printing progress.
 //!
 //! Usage: cargo run --release -p whimpr-models --example fetch -- <model-id> <folder>
-//! Ids: whisper-base-en, whisper-large-v3-turbo. Stop it with Ctrl-C and run it again to see it resume.
+//! Ids: whisper-base-en, whisper-large-v3-turbo, parakeet-tdt-v2. Stop it with Ctrl-C and run it again to see it resume.
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -18,7 +18,7 @@ fn main() {
     let mut next_report = 0u64;
     let result = download(&spec, Path::new(folder), &Options::default(), &AtomicBool::new(false), &mut |p| match p {
         Progress::Downloading { downloaded, total } => {
-            let percent = downloaded * 100 / total;
+            let percent = downloaded * 100 / total.max(1);
             if percent >= next_report {
                 println!("{percent:>3}%  {} / {} MB", downloaded / 1_000_000, total / 1_000_000);
                 next_report = percent + 10;
@@ -28,7 +28,7 @@ fn main() {
         Progress::Done => println!("done"),
     });
     match result {
-        Ok(path) => println!("saved to {}", path.display()),
+        Ok(()) => println!("saved to {}", spec.install_dir(Path::new(folder)).display()),
         Err(e) => {
             eprintln!("failed: {e}");
             std::process::exit(1);

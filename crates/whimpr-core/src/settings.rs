@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::asr::AsrEngineId;
 use crate::cleanup::{CleanupLevel, FormatMode};
 
 /// Which cleanup engine processes transcripts.
@@ -62,6 +63,14 @@ pub struct Settings {
     /// and the raw transcript is pasted instead.
     #[serde(default = "default_local_llm_timeout_ms")]
     pub local_llm_timeout_ms: u32,
+    /// Which speech recogniser to use. Whisper is the default; Parakeet is opt-in and needs
+    /// its model downloaded.
+    #[serde(default = "default_asr_engine")]
+    pub asr_engine: AsrEngineId,
+}
+
+fn default_asr_engine() -> AsrEngineId {
+    AsrEngineId::WhisperCpp
 }
 
 fn default_local_llm_timeout_ms() -> u32 {
@@ -86,6 +95,7 @@ impl Default for Settings {
             format_mode: FormatMode::default(),
             review_enabled: true,
             local_llm_timeout_ms: default_local_llm_timeout_ms(),
+            asr_engine: default_asr_engine(),
         }
     }
 }
@@ -122,6 +132,18 @@ mod tests {
         let old = r#"{"cleanup_mode":"anthropic","cleanup_level":"light","openai_model":"m","anthropic_model":"a","sound_on_start":true}"#;
         let s: Settings = serde_json::from_str(old).unwrap();
         assert_eq!((s.cleanup_mode, s.local_llm_timeout_ms), (CleanupMode::Anthropic, 3000));
+    }
+
+    #[test]
+    fn the_speech_engine_defaults_to_whisper_and_old_files_keep_it() {
+        assert_eq!(Settings::default().asr_engine, AsrEngineId::WhisperCpp);
+        let old = r#"{"cleanup_mode":"raw","cleanup_level":"none","openai_model":"m","anthropic_model":"a","sound_on_start":true}"#;
+        let s: Settings = serde_json::from_str(old).unwrap();
+        assert_eq!(s.asr_engine, AsrEngineId::WhisperCpp, "a settings file from before engines were selectable");
+        let chosen = Settings { asr_engine: AsrEngineId::OnnxParakeet, ..Settings::default() };
+        let json = serde_json::to_string(&chosen).unwrap();
+        assert!(json.contains("\"onnx_parakeet\""), "{json}");
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().asr_engine, AsrEngineId::OnnxParakeet);
     }
 
     #[test]

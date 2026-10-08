@@ -14,6 +14,7 @@ members = [
     "crates/whimpr-eval",
     "crates/whimpr-vad",
     "crates/whimpr-models",
+    "crates/whimpr-asr-parakeet",
     "src-tauri",
 ]
 
