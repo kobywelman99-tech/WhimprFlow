@@ -13,6 +13,7 @@ members = [
     "crates/whimpr-ffi",
     "crates/whimpr-eval",
     "crates/whimpr-vad",
+    "crates/whimpr-models",
     "src-tauri",
 ]
 

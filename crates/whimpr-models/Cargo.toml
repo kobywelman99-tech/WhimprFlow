@@ -1,0 +1,19 @@
+[package]
+name = "whimpr-models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# The speech models the app can download on first run: a registry (what, where, how big,
+# which SHA-256) and a downloader that resumes, verifies and never leaves a half-written
+# model where the app would load it. No UI or Tauri here, so it is tested on its own.
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["rt", "time"] }
+sha2 = "0.10"
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+sha2 = "0.10"

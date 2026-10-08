@@ -5728,6 +5728,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "whimpr-models"
+version = "0.1.1"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "whimpr-sidecar"
 version = "0.1.1"
 
