@@ -3,7 +3,8 @@
 
 use std::path::Path;
 
-use whimpr_core::asr::{AsrCaps, AsrEngine, AsrEngineId, Transcript};
+use whimpr_core::asr::{AsrCaps, AsrEngine, AsrEngineId, AsrOptions, Transcript};
+use whimpr_core::audio_gate::MIN_WHISPER_SAMPLES;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// A loaded whisper model ready to transcribe utterances.
@@ -23,7 +24,8 @@ impl WhisperEngine {
     }
 
     /// Like [`AsrEngine::transcribe`], but primes whisper with `prompt` (the
-    /// user's vocabulary), which nudges it toward those spellings.
+    /// user's vocabulary), which nudges it toward those spellings. Windows still calls
+    /// this directly; new code uses [`AsrEngine::transcribe_with`].
     pub fn transcribe_with_prompt(&self, pcm16k: &[f32], prompt: Option<&str>) -> anyhow::Result<Transcript> {
         self.transcribe_inner(pcm16k, prompt)
     }
@@ -58,8 +60,18 @@ impl AsrEngine for WhisperEngine {
         }
     }
 
+    /// Run one decode over a second of silence, so the GPU kernels are built and the
+    /// weights are paged in before the first real dictation.
+    fn warmup(&self) -> anyhow::Result<()> {
+        self.transcribe_inner(&vec![0.0; MIN_WHISPER_SAMPLES], None).map(|_| ())
+    }
+
     fn transcribe(&self, pcm16k: &[f32]) -> anyhow::Result<Transcript> {
         self.transcribe_inner(pcm16k, None)
+    }
+
+    fn transcribe_with(&self, pcm16k: &[f32], options: &AsrOptions) -> anyhow::Result<Transcript> {
+        self.transcribe_inner(pcm16k, options.prompt.as_deref())
     }
 }
 

@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use std::cell::RefCell;
 
+use whimpr_core::asr::{AsrEngine, AsrOptions};
 use whimpr_core::audio_gate::{self, GatePolicy, Gated, SpeechDetector};
 use whimpr_core::cleanup::CleanupLevel;
 use whimpr_core::pipeline::{self, Env, Providers};
@@ -19,17 +20,6 @@ use crate::score;
 /// Whole-clip peak below which the app doesn't even run recognition
 /// (mirrors `hotkey.rs`; Task 4 moves this into `whimpr_core::audio_gate`).
 pub const SILENCE_PEAK: f32 = 0.005;
-
-/// Speech recognition, as the runner needs it.
-pub trait Asr {
-    fn transcribe(&self, pcm16k: &[f32], prompt: Option<&str>) -> anyhow::Result<String>;
-}
-
-impl Asr for whimpr_asr::WhisperEngine {
-    fn transcribe(&self, pcm16k: &[f32], prompt: Option<&str>) -> anyhow::Result<String> {
-        Ok(self.transcribe_with_prompt(pcm16k, prompt)?.text)
-    }
-}
 
 pub struct Config {
     pub fixtures_dir: PathBuf,
@@ -69,7 +59,7 @@ fn ms(since: Instant) -> u32 {
 /// Everything a clip needs besides the clip itself.
 struct Ctx<'a, 'd> {
     cfg: &'a Config,
-    asr: &'a dyn Asr,
+    asr: &'a dyn AsrEngine,
     /// The voice-activity detector the app uses, if one is loaded.
     detector: Option<RefCell<&'d mut (dyn SpeechDetector + 'd)>>,
     dictionary: &'a whimpr_core::dictionary::DictionaryStore,
@@ -82,7 +72,7 @@ struct Ctx<'a, 'd> {
 pub fn run<'d>(
     manifest: &Manifest,
     cfg: &Config,
-    asr: &dyn Asr,
+    asr: &dyn AsrEngine,
     detector: Option<&'d mut (dyn SpeechDetector + 'd)>,
     providers: Providers,
 ) -> Vec<FixtureResult> {
@@ -146,7 +136,7 @@ fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx<'_, '_>) -> anyhow::Result<Fixtu
             }
             Gated::Audio { pcm: audio, speech_ms } => {
                 let started = Instant::now();
-                let text = ctx.asr.transcribe(&audio, ctx.prompt.as_deref())?;
+                let text = ctx.asr.transcribe_with(&audio, &AsrOptions { prompt: ctx.prompt.clone() })?.text;
                 result.timings.asr_ms = ms(started);
                 // Whisper's stock phrase for "nothing was said", on audio with next to no speech.
                 if speech_ms.is_some_and(|ms| audio_gate::is_hallucination(&text, ms)) { String::new() } else { text }
@@ -198,7 +188,7 @@ fn run_one(fx: &Fixture, path: &Path, ctx: &Ctx<'_, '_>) -> anyhow::Result<Fixtu
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     use super::*;
     use crate::manifest::Manifest;
@@ -206,30 +196,42 @@ mod tests {
     /// Recognition that returns scripted text and records the prompt it was given.
     struct FakeAsr {
         text: &'static str,
-        calls: RefCell<Vec<Option<String>>>,
+        calls: Mutex<Vec<Option<String>>>,
         /// How many samples each call was given.
-        lengths: RefCell<Vec<usize>>,
+        lengths: Mutex<Vec<usize>>,
     }
 
     impl FakeAsr {
         fn new(text: &'static str) -> Self {
-            Self { text, calls: RefCell::new(Vec::new()), lengths: RefCell::new(Vec::new()) }
+            Self { text, calls: Mutex::new(Vec::new()), lengths: Mutex::new(Vec::new()) }
         }
     }
 
-    impl Asr for FakeAsr {
-        fn transcribe(&self, pcm: &[f32], prompt: Option<&str>) -> anyhow::Result<String> {
-            self.calls.borrow_mut().push(prompt.map(String::from));
-            self.lengths.borrow_mut().push(pcm.len());
-            Ok(self.text.to_string())
+    impl AsrEngine for FakeAsr {
+        fn id(&self) -> whimpr_core::AsrEngineId {
+            whimpr_core::AsrEngineId::WhisperCpp
+        }
+
+        fn transcribe(&self, pcm: &[f32]) -> anyhow::Result<whimpr_core::Transcript> {
+            self.transcribe_with(pcm, &AsrOptions::default())
+        }
+
+        fn transcribe_with(&self, pcm: &[f32], options: &AsrOptions) -> anyhow::Result<whimpr_core::Transcript> {
+            self.calls.lock().unwrap().push(options.prompt.clone());
+            self.lengths.lock().unwrap().push(pcm.len());
+            Ok(whimpr_core::Transcript { text: self.text.to_string(), confidence: None })
         }
     }
 
     /// Recognition that fails the test if it is ever asked to run.
     struct NeverAsr;
 
-    impl Asr for NeverAsr {
-        fn transcribe(&self, _: &[f32], _: Option<&str>) -> anyhow::Result<String> {
+    impl AsrEngine for NeverAsr {
+        fn id(&self) -> whimpr_core::AsrEngineId {
+            whimpr_core::AsrEngineId::WhisperCpp
+        }
+
+        fn transcribe(&self, _: &[f32]) -> anyhow::Result<whimpr_core::Transcript> {
             panic!("recognition must not run on a clip with no speech");
         }
     }
@@ -290,12 +292,12 @@ mod tests {
         assert_eq!(speech.status, Status::Ok);
         assert_eq!(speech.raw, "renew ChargeBee", "the dictionary's mishear fix is applied");
         assert_eq!(speech.raw_wer, Some(0.0));
-        assert!(asr.calls.borrow()[0].as_deref().unwrap().contains("ChargeBee"), "the dictionary is the recognition prompt");
+        assert!(asr.calls.lock().unwrap()[0].as_deref().unwrap().contains("ChargeBee"), "the dictionary is the recognition prompt");
         assert_eq!(speech.cleaned_pass, None, "no cleanup ran, so cleaned-text expectations don't apply");
 
         let quiet = &results[1];
         assert!(quiet.skipped_silent, "silence never reaches recognition");
-        assert_eq!(asr.calls.borrow().len(), 1);
+        assert_eq!(asr.calls.lock().unwrap().len(), 1);
         assert_eq!(quiet.cleaned_pass, Some(true), "no output is the right answer for silence");
 
         assert_eq!(results[2].status, Status::Missing, "a clip that isn't recorded yet is reported, not skipped");
@@ -394,7 +396,7 @@ mod tests {
 
         run(&manifest, &config(&dir), &asr, Some(&mut detector), Providers::default());
 
-        let given = asr.lengths.borrow()[0];
+        let given = asr.lengths.lock().unwrap()[0];
         assert!(given >= audio_gate::MIN_WHISPER_SAMPLES, "whisper was handed only {given} samples");
     }
 }

@@ -25,7 +25,7 @@ pub mod stats;
 pub mod style;
 pub mod types;
 
-pub use asr::{AsrEngine, AsrEngineId, Transcript};
+pub use asr::{AsrEngine, AsrEngineId, AsrOptions, AsrSlot, Transcript};
 pub use cleanup::{CleanupContext, CleanupLevel, CleanupProvider, FormatMode, ProviderId, VocabEntry};
 pub use credentials::CredentialStore;
 pub use diagnostics::{Diagnostic, InjectionFailure, Platform};

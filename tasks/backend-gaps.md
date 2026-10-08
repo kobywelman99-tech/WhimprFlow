@@ -173,10 +173,19 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 ### Task 6: Swappable, warmable ASR behind the trait
 **Description:** Add `AsrOptions { prompt }` and `transcribe_with(&[f32], &AsrOptions)` to `AsrEngine` (default calls `transcribe`). Replace `ASR: OnceLock<Arc<WhisperEngine>>` with a swappable `RwLock<Option<Arc<dyn AsrEngine>>>`; the partial-transcript loop and finalize use the trait. Call `warmup()` at load (a second of silence) so the first dictation isn't cold. Clear `ASR_MODEL_MISSING` when an engine arrives.
 **Acceptance criteria:**
-- [ ] Behavior unchanged for whisper (eval WER identical)
-- [ ] Engine can be replaced at runtime (unit test with fake engines)
-- [ ] First-dictation latency before/after warm-up measured in the eval/timings
+- [x] Behavior unchanged for whisper (eval WER identical)
+- [x] Engine can be replaced at runtime (unit test with fake engines)
+- [x] First-dictation latency before/after warm-up measured in the eval/timings
 **Verification:** `cargo test -p whimpr-core -p whimpr-asr`, eval before/after, manual first dictation after launch
+
+**Progress:**
+- [x] `whimpr_core::asr`: `AsrOptions { prompt }`, `AsrEngine::transcribe_with` (default ignores the options, so Parakeet can skip the prompt), `AsrSlot` (a swappable `RwLock<Option<Arc<dyn AsrEngine>>>`; a dictation holds its own `Arc`, so a swap never interrupts one in flight) and `install` (warm up, then publish; a failed warm-up is reported but the engine is still used). 10 tests with fake engines, including swapping while 8 threads read
+- [x] `WhisperEngine`: `warmup()` (one decode over 1.1 s of silence) and `transcribe_with`. `hotkey.rs` uses the slot everywhere (finalize, live preview, calibration), clears `ASR_MODEL_MISSING` when an engine arrives, and logs the warm-up time. The eval harness now uses the core trait instead of its own copy (a review suggestion)
+- [x] **Behavior unchanged, measured against the exact commit before this task:** 13/13 identical transcripts on the smoke set, mean WER 0.075 → 0.075, ASR p50 63 → 63 ms
+- [x] **Warm-up benefit measured, and it is small on `base.en`:** first decode about 99 ms cold vs 92 ms warm (3 runs each, within noise), for a one-time 51 ms at launch. The gain should be larger for `large-v3-turbo`, but that model isn't installed here, so **that is unmeasured**. `cargo run --release -p whimpr-asr --example cold_vs_warm -- <model> <wav> [--warm]` reproduces it
+- [ ] Koby: with `./dev.sh`, check the log shows "ASR model loaded and warmed (… ms)" and that dictation works as before. If you install `large-v3-turbo`, run the example above with it to see the real cold-start cost
+- [ ] Not changed: the live preview still decodes without padding, so for 0.6-1.0 s of speech it shows nothing (whisper's one-second minimum)
+
 **Dependencies:** T2, T3 · **Files:** `crates/whimpr-core/src/asr/mod.rs`, `crates/whimpr-asr/src/lib.rs`, `src-tauri/src/hotkey.rs` · **Scope:** M
 
 ### Task 7: Model download manager
@@ -363,4 +372,5 @@ Numbers from `whimpr-eval`. **Until Koby's 30 clips exist, the only data is a sm
 | Task 4 | padding only (`--no-vad`) | smoke (10 clips + 3 silent/noise) | 0.075 | very short clips fixed. Faint noise above the old peak gate: whisper wrote "raine.com" and took 1172 ms |
 | Task 4 | padding + VAD | same | 0.075 | noise clip: skipped in 7 ms, nothing pasted. VAD cost p50 5 ms, p95 8 ms. ASR p95 1172 → 89 ms. Speech clips unchanged in WER (transcriptions of trimmed clips can differ slightly) |
 | Task 4 follow-up | VAD start 0.3 / continue 0.2 / blip 4 frames; one-word hallucination entries removed | 8 `say` one-word clips + the smoke set | words: 0.125 mean (the "ok" row is my reference saying "ok" vs whisper's "Okay") | "bye", "you", "no" were skipped before; now "Bye." "You." "No." Silence, room tone and noise still skipped; earlier smoke-set WER unchanged at 0.075 |
+| Task 6 | swappable engine trait (no behavior change) | smoke set vs the commit just before | 0.075 → 0.075 | 13/13 transcripts identical; ASR p50 63 → 63 ms. Warm-up: first decode ~99 → ~92 ms on base.en (noise-level) |
 

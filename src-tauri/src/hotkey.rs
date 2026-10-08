@@ -33,7 +33,7 @@ mod imp {
     use tauri::{AppHandle, Emitter};
     use whimpr_core::state::{Action, BarState};
     use whimpr_core::{
-        AsrEngine, CleanupMode, Input, PipelineEvent, StateMachine,
+        CleanupMode, Input, PipelineEvent, StateMachine,
         TriggerToken,
     };
     use whimpr_ipc::BindingId;
@@ -120,7 +120,8 @@ mod imp {
     /// Cleanup uses it to format for the medium (email vs. text vs. chat).
     static TARGET_APP: OnceLock<Mutex<Option<String>>> = OnceLock::new();
     static CAPTURE: OnceLock<Mutex<Option<whimpr_audio::CaptureHandle>>> = OnceLock::new();
-    static ASR: OnceLock<Arc<whimpr_asr::WhisperEngine>> = OnceLock::new();
+    /// The speech recogniser in use; replaceable while the app runs (see `AsrSlot`).
+    static ASR: whimpr_core::AsrSlot = whimpr_core::AsrSlot::new();
     static OPENAI: OnceLock<Mutex<Option<whimpr_cleanup::OpenAiProvider>>> = OnceLock::new();
     static ANTHROPIC: OnceLock<Mutex<Option<whimpr_cleanup::AnthropicProvider>>> = OnceLock::new();
     /// The supervised on-device model; `None` when the worker or model file is missing.
@@ -337,14 +338,15 @@ mod imp {
         whimpr_core::pipeline::fix_mishears(raw, dictionary.as_deref(), brain.as_deref())
     }
 
-    /// The user's spellings (dictionary + words the brain has seen misheard) as a
-    /// whisper `initial_prompt`.
-    fn whisper_prompt() -> Option<String> {
+    /// Hints for the recogniser: the user's spellings (dictionary + words the brain has seen
+    /// misheard), which whisper takes as its `initial_prompt`. Engines without a prompt
+    /// ignore them.
+    fn asr_options() -> whimpr_core::AsrOptions {
         let mut words = DICTIONARY.get().map(|m| m.lock_recover().bias_words()).unwrap_or_default();
         if let Some(m) = BRAIN.get() {
             words.extend(m.lock_recover().bias_words(40));
         }
-        whimpr_asr::vocab_prompt(&words)
+        whimpr_core::AsrOptions { prompt: whimpr_asr::vocab_prompt(&words) }
     }
 
     static CAL_CAPTURE: OnceLock<Mutex<Option<whimpr_audio::CaptureHandle>>> = OnceLock::new();
@@ -368,11 +370,9 @@ mod imp {
             .and_then(|s| s.lock_recover().take())
             .ok_or_else(|| "Nothing is being recorded.".to_string())?;
         let res = handle.stop().ok_or_else(|| "No audio was captured.".to_string())?;
-        let asr = ASR.get().cloned().ok_or_else(|| "The speech model isn't ready yet.".to_string())?;
+        let asr = ASR.get().ok_or_else(|| "The speech model isn't ready yet.".to_string())?;
         let pcm = whimpr_audio::resample_to_16k(&res.samples, res.sample_rate);
-        let t = asr
-            .transcribe_with_prompt(&pcm, whisper_prompt().as_deref())
-            .map_err(|e| e.to_string())?;
+        let t = asr.transcribe_with(&pcm, &asr_options()).map_err(|e| e.to_string())?;
         Ok(t.text)
     }
 
@@ -570,7 +570,7 @@ mod imp {
             if PARTIAL_BUSY.swap(true, Ordering::SeqCst) {
                 continue; // previous decode still running; skip this tick
             }
-            let Some(asr) = ASR.get().cloned() else {
+            let Some(asr) = ASR.get() else {
                 PARTIAL_BUSY.store(false, Ordering::SeqCst);
                 continue;
             };
@@ -741,7 +741,7 @@ mod imp {
                         finish();
                         return;
                     }
-                    let Some(asr) = ASR.get().cloned() else {
+                    let Some(asr) = ASR.get() else {
                         eprintln!("[whimpr] ASR not ready (model still loading or missing)");
                         if was_real_attempt && ASR_MODEL_MISSING.load(Ordering::SeqCst) {
                             crate::diag::report(&app2, whimpr_core::InjectionFailure::AsrUnavailable);
@@ -778,7 +778,7 @@ mod imp {
                     };
 
                     let asr_started = Instant::now();
-                    let transcribed = asr.transcribe_with_prompt(&pcm, whisper_prompt().as_deref());
+                    let transcribed = asr.transcribe_with(&pcm, &asr_options());
                     let asr_ms = ms_since(asr_started);
                     match transcribed {
                         Ok(mut t) => {
@@ -965,8 +965,15 @@ mod imp {
             }
             match whimpr_asr::WhisperEngine::load(&path) {
                 Ok(engine) => {
-                    let _ = ASR.set(Arc::new(engine));
-                    eprintln!("[whimpr] ASR model loaded — ready to transcribe");
+                    // Warm it up first, so the first dictation isn't the one that pays for the
+                    // cold start, then put it in use (which also clears "model missing").
+                    let started = Instant::now();
+                    let warmup_error = whimpr_core::asr::install(&ASR, Arc::new(engine));
+                    ASR_MODEL_MISSING.store(false, Ordering::SeqCst);
+                    match warmup_error {
+                        None => eprintln!("[whimpr] ASR model loaded and warmed ({} ms) — ready to transcribe", ms_since(started)),
+                        Some(e) => eprintln!("[whimpr] ASR model loaded; warm-up failed ({e}) — ready to transcribe"),
+                    }
                 }
                 Err(e) => {
                     eprintln!("[whimpr] ASR model load failed: {e}");
