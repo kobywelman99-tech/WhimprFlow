@@ -1,65 +1,64 @@
-# Which model do I download?
+# Speech and cleanup models
 
-WhimprFlow does **not** download models for you — you place them by hand in a
-folder, and the app picks up whichever ones it finds. This page exists
-because "it tells me to download a ggml-base speech model, which one do I
-download?" was a real support report: the Hugging Face pages this points at
-list dozens of files, and only a few exact names are ones WhimprFlow actually
-looks for.
-
-There are two *separate* models. **You only ever need the first one.**
+There are two *separate* models. **You only ever need the first one**, and WhimprFlow
+downloads it for you.
 
 | Model | What it's for | Required? |
 |---|---|---|
-| Whisper (`ggml-*.bin`) | Speech-to-text — turns your voice into a raw transcript | **Yes** |
-| Qwen (`*.gguf`) | Optional *local, offline* cleanup pass (fillers, punctuation, self-corrections) | **No** — skip this and either use the cloud Cleanup Engine (OpenAI/Anthropic/OpenRouter key in Settings) or set Auto Cleanup to **None** for raw, verbatim text. Nothing extra to download either way. |
+| Whisper (`ggml-*.bin`) | Speech-to-text: turns your voice into a raw transcript | **Yes** |
+| Qwen (`*.gguf`) | Optional *local, offline* cleanup pass (fillers, punctuation, self-corrections) | **No**. Skip it and either use the cloud Cleanup Engine (OpenAI/Anthropic/OpenRouter key in Settings) or set Auto Cleanup to **None** for raw, verbatim text. |
 
-If dictation types nothing at all, that's not a missing model problem — see
-the Troubleshooting section in the README first (Accessibility permission on
-macOS, or the loud in-app error the pill/Hub now show).
+If dictation types nothing at all, that's not a missing model problem; see the Troubleshooting
+section in the README first (Accessibility permission on macOS, or the loud in-app error the
+pill/Hub shows).
 
-## 1. Speech-to-text (Whisper) — required
+## 1. Speech-to-text (Whisper): required
 
-Download **one** file and put it in your models folder:
+**On macOS, WhimprFlow downloads it for you.** On first run, the setup screen offers two models;
+you can add or switch later under **Settings ▸ Speech model**.
 
-**Recommended default — `ggml-base.en.bin` (148 MB, English-only, fastest to load):**
-
-```
-https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
-```
-
-Save it with that exact name, no renaming needed. Place it at:
-
-- **macOS**: `~/Library/Application Support/WhimprFlow/models/ggml-base.en.bin`
-- **Windows**: `%APPDATA%\WhimprFlow\models\ggml-base.en.bin`
-
-That's it — restart WhimprFlow and dictation works.
-
-### Want better accuracy? (optional)
-
-WhimprFlow checks for a short list of exact filenames, in this order, and
-uses the first (best) one it finds — so a bigger model doesn't need any
-settings change, just drop it in the same folder alongside or instead of the
-base one:
-
-| File (exact name) | Size | Platform | Notes |
+| Model | File | Size | Good for |
 |---|---|---|---|
-| `ggml-large-v3-turbo.bin` | 1.62 GB | macOS only | Best accuracy, still fast on Apple Silicon (Metal) |
-| `ggml-medium.en.bin` | 1.53 GB | macOS + Windows | Noticeably better than base, slower |
-| `ggml-small.en.bin` | 488 MB | macOS + Windows | Good middle ground |
-| `ggml-base.en.bin` | 148 MB | macOS + Windows | **The recommended default above** |
+| **Fast** | `ggml-base.en.bin` | 148 MB | Ready in about a minute; quick on any Mac. The default. |
+| **Best** | `ggml-large-v3-turbo.bin` | 1.62 GB | The most accurate, especially with names and unusual words. About 5× slower to transcribe than Fast, but still under half a second for a long sentence on Apple Silicon. |
 
-All are official builds from the same repo — swap `ggml-base.en.bin` for any
-of the names above in the URL pattern:
+What the downloader does for you:
+
+- Saves to `~/Library/Application Support/WhimprFlow/models/`.
+- Writes to a `.part` file first. If your connection drops, you cancel, or the app quits, the
+  next try continues where it left off instead of starting over.
+- Checks the finished file against its published SHA-256 before using it. A file that doesn't
+  match is deleted, never loaded.
+- Starts using the new model straight away, with no restart. A dictation already in progress
+  finishes on the model it started with.
+- Never re-downloads a model that is already there.
+
+If more than one model is installed, the most accurate present one is used, in this order:
+`ggml-large-v3-turbo.bin`, `ggml-medium.en.bin`, `ggml-small.en.bin`, `ggml-base.en.bin`.
+
+**Windows** doesn't use the downloader yet; place the file by hand (below), then restart.
+
+### Placing a model by hand (any platform, or if you're offline)
+
+Download one file and save it with its exact name:
 
 ```
 https://huggingface.co/ggerganov/whisper.cpp/resolve/main/<exact filename>
 ```
 
-Any other filename in that repo (quantized `-q5_1`/`-q8_0` variants, non-`.en`
-multilingual models, CoreML `.mlmodelc.zip` bundles, `tiny.en`) is **not**
-recognized by WhimprFlow today — renaming one of those to a name in the table
-above will not work; the file format has to match too, not just the name.
+| File (exact name) | Size | SHA-256 |
+|---|---|---|
+| `ggml-base.en.bin` | 147,964,211 bytes | `a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002` |
+| `ggml-large-v3-turbo.bin` | 1,624,555,275 bytes | `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69` |
+| `ggml-medium.en.bin` | 1.53 GB | not downloadable in-app; recognised if you place it |
+| `ggml-small.en.bin` | 488 MB | not downloadable in-app; recognised if you place it |
+
+Place it at `~/Library/Application Support/WhimprFlow/models/` (macOS) or
+`%APPDATA%\WhimprFlow\models\` (Windows). Any other filename in that repo (quantized
+`-q5_1`/`-q8_0` variants, multilingual models, CoreML bundles, `tiny.en`) is **not** recognised
+today: renaming one won't work, because the file format has to match too.
+
+To check a file yourself: `shasum -a 256 <file>` should print the hash above.
 
 ## 2. Local cleanup LLM (Qwen, GGUF) — optional
 
@@ -91,11 +90,12 @@ If both are present, WhimprFlow prefers the 4B one. Then in the Hub, set
 ## Checking it worked
 
 Launch WhimprFlow from a terminal (`./dev.sh` on macOS, or run the built
-`.exe` from PowerShell on Windows) and hold your dictation key. You should see:
+`.exe` from PowerShell on Windows). You should see:
 
 ```
-[whimpr] ASR model loaded — ready to transcribe
+[whimpr] ASR model ggml-base.en.bin loaded and warmed (… ms) — ready to transcribe
 ```
 
-at startup. If instead you see `ASR model not found at <path>`, the filename
-or folder doesn't match exactly what's listed above — re-check both.
+at startup. If instead you see `ASR model not found at <path>`, no speech model is installed:
+open **Settings ▸ Speech model** and download one, or check that a hand-placed file's name and
+folder match exactly what's listed above.

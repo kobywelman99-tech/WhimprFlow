@@ -11,6 +11,7 @@ mod autolearn;
 mod diag;
 mod hotkey;
 mod local_llm;
+mod models;
 mod paste;
 mod permissions;
 #[cfg(target_os = "windows")]
@@ -332,6 +333,8 @@ struct StatusReport {
     microphone_hint: Option<String>,
     has_openai_key: bool,
     has_anthropic_key: bool,
+    /// A speech model is installed (whisper recognition can run).
+    has_asr_model: bool,
 }
 
 #[tauri::command]
@@ -346,7 +349,29 @@ fn get_status() -> StatusReport {
         microphone_hint: p.microphone_hint,
         has_openai_key: has_key("openai_api_key"),
         has_anthropic_key: has_key("anthropic_api_key"),
+        has_asr_model: models::asr_model_installed(),
     }
+}
+
+// ── Speech models ───────────────────────────────────────────────────────────
+
+/// The downloadable speech models and which are installed / in use.
+#[tauri::command]
+fn list_models() -> Vec<models::ModelDto> {
+    models::list()
+}
+
+/// Start downloading a model in the background; progress arrives as
+/// `whimpr://models/progress` events.
+#[tauri::command]
+fn download_model(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    models::start(app, &id)
+}
+
+/// Stop the running download. The part already fetched is kept for next time.
+#[tauri::command]
+fn cancel_model_download() -> bool {
+    models::cancel()
 }
 
 /// The most recent loud diagnostic (permission/injection failure), if any —
@@ -481,6 +506,9 @@ pub fn run() {
             reset_style_profile,
             get_status,
             get_last_error,
+            list_models,
+            download_model,
+            cancel_model_download,
             request_microphone,
             request_accessibility,
             request_input_monitoring,

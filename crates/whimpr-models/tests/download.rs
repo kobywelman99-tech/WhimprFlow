@@ -243,7 +243,7 @@ fn cancelling_stops_promptly_and_keeps_the_partial_file_for_later() {
 
     assert!(matches!(result, Err(DownloadError::Cancelled)), "{result:?}");
     let kept = std::fs::metadata(part(&dir)).unwrap().len();
-    assert!(kept >= 100_000 && kept < 600_000, "kept {kept}");
+    assert!((100_000..600_000).contains(&kept), "kept {kept}");
     assert!(events < 20, "kept downloading after the cancel: {events} events");
 
     // Later, it picks up where it stopped.

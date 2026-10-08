@@ -5763,6 +5763,7 @@ dependencies = [
  "whimpr-cleanup",
  "whimpr-core",
  "whimpr-ipc",
+ "whimpr-models",
  "whimpr-vad",
  "windows 0.58.0",
 ]

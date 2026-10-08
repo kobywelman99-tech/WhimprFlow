@@ -176,19 +176,39 @@ mod imp {
     /// English models mis-hear names/technical terms far less (and better ASR means
     /// less for cleanup and the dictionary to fix downstream).
     fn model_path() -> PathBuf {
-        let dir = support_dir().join("models");
-        for name in [
-            "ggml-large-v3-turbo.bin",
-            "ggml-medium.en.bin",
-            "ggml-small.en.bin",
-            "ggml-base.en.bin",
-        ] {
-            let p = dir.join(name);
-            if p.exists() {
-                return p;
-            }
+        let dir = models_dir();
+        whimpr_models::best_whisper_model(&dir).unwrap_or_else(|| dir.join("ggml-base.en.bin"))
+    }
+
+    /// Where speech models live.
+    pub fn models_dir() -> PathBuf {
+        support_dir().join("models")
+    }
+
+    /// Load the best installed speech model, warm it, and put it in use, replacing any engine
+    /// already running (in-flight dictations finish on the old one). `Ok(true)` means it is
+    /// live now; macOS always can.
+    pub fn reload_asr_model() -> Result<bool, String> {
+        let path = model_path();
+        if !path.exists() {
+            ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
+            return Err(format!("no speech model found at {}", path.display()));
         }
-        dir.join("ggml-base.en.bin")
+        let engine = whimpr_asr::WhisperEngine::load(&path).map_err(|e| {
+            ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
+            e.to_string()
+        })?;
+        // Warm it up first, so the first dictation isn't the one that pays for the cold start,
+        // then put it in use (which also clears "model missing").
+        let started = Instant::now();
+        let warmup_error = whimpr_core::asr::install(&ASR, Arc::new(engine));
+        ASR_MODEL_MISSING.store(false, Ordering::SeqCst);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match warmup_error {
+            None => eprintln!("[whimpr] ASR model {name} loaded and warmed ({} ms) — ready to transcribe", ms_since(started)),
+            Some(e) => eprintln!("[whimpr] ASR model {name} loaded; warm-up failed ({e}) — ready to transcribe"),
+        }
+        Ok(true)
     }
 
     fn support_dir() -> PathBuf {
@@ -963,22 +983,8 @@ mod imp {
                 ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
                 return;
             }
-            match whimpr_asr::WhisperEngine::load(&path) {
-                Ok(engine) => {
-                    // Warm it up first, so the first dictation isn't the one that pays for the
-                    // cold start, then put it in use (which also clears "model missing").
-                    let started = Instant::now();
-                    let warmup_error = whimpr_core::asr::install(&ASR, Arc::new(engine));
-                    ASR_MODEL_MISSING.store(false, Ordering::SeqCst);
-                    match warmup_error {
-                        None => eprintln!("[whimpr] ASR model loaded and warmed ({} ms) — ready to transcribe", ms_since(started)),
-                        Some(e) => eprintln!("[whimpr] ASR model loaded; warm-up failed ({e}) — ready to transcribe"),
-                    }
-                }
-                Err(e) => {
-                    eprintln!("[whimpr] ASR model load failed: {e}");
-                    ASR_MODEL_MISSING.store(true, Ordering::SeqCst);
-                }
+            if let Err(e) = reload_asr_model() {
+                eprintln!("[whimpr] ASR model load failed: {e}");
             }
         });
 
@@ -1097,8 +1103,8 @@ mod imp {
 pub use imp::{
     brain_learn, brain_reset, brain_summary, calibration_record_start, calibration_record_stop,
     cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
-    dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
-    stop_dictation, style_summaries, update_settings,
+    dictionary_remove, history, install, models_dir, rebuild_providers, reload_asr_model, reset_style,
+    stats_summary, stop_dictation, style_summaries, update_settings,
 };
 
 // Windows uses the real (but unverified) platform layer in `crate::win`.
@@ -1106,8 +1112,8 @@ pub use imp::{
 pub use crate::win::{
     brain_learn, brain_reset, brain_summary, calibration_record_start, calibration_record_stop,
     cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
-    dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
-    stop_dictation, style_summaries, update_settings,
+    dictionary_remove, history, install, models_dir, rebuild_providers, reload_asr_model, reset_style,
+    stats_summary, stop_dictation, style_summaries, update_settings,
 };
 
 // Other platforms (Linux, etc.): inert stubs so the crate still builds.
@@ -1131,6 +1137,12 @@ mod other {
     pub fn dictionary_add(_correct: String, _mishears: Vec<String>) {}
     pub fn dictionary_remove(_correct: &str) {}
     pub fn dictionary_learn(_correct: String, _mishears: Vec<String>) {}
+    pub fn models_dir() -> std::path::PathBuf {
+        std::path::PathBuf::new()
+    }
+    pub fn reload_asr_model() -> Result<bool, String> {
+        Ok(false)
+    }
     pub fn brain_learn(_pairs: Vec<(String, String)>) {}
     pub fn brain_summary() -> whimpr_core::brain::Summary {
         whimpr_core::brain::Brain::default().summary()
@@ -1156,6 +1168,6 @@ mod other {
 pub use other::{
     brain_learn, brain_reset, brain_summary, calibration_record_start, calibration_record_stop,
     cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
-    dictionary_remove, history, install, rebuild_providers, reset_style, stats_summary,
-    stop_dictation, style_summaries, update_settings,
+    dictionary_remove, history, install, models_dir, rebuild_providers, reload_asr_model, reset_style,
+    stats_summary, stop_dictation, style_summaries, update_settings,
 };

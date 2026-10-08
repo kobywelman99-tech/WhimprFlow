@@ -48,6 +48,8 @@ export interface Status {
   microphone_hint: string | null;
   has_openai_key: boolean;
   has_anthropic_key: boolean;
+  // A speech model is installed, so dictation can run.
+  has_asr_model: boolean;
 }
 
 // What the Hub falls back to before the first read lands (and in a plain
@@ -61,6 +63,7 @@ export const UNKNOWN_STATUS: Status = {
   microphone_hint: null,
   has_openai_key: false,
   has_anthropic_key: false,
+  has_asr_model: false,
 };
 
 // p50/p95 of one pipeline stage over the last 200 measured dictations. `n` is how many
@@ -175,6 +178,60 @@ export async function onPermissions(cb: (p: Permissions) => void): Promise<() =>
   try {
     const { listen } = await import("@tauri-apps/api/event");
     return await listen<Permissions>("whimpr://permissions", (e) => cb(e.payload));
+  } catch {
+    return () => {};
+  }
+}
+
+// ── Speech models ────────────────────────────────────────────────────────────
+// Mirrors `models::ModelDto` / `models::ProgressDto` in src-tauri.
+export interface ModelInfo {
+  id: string;
+  title: string;
+  blurb: string;
+  size_bytes: number;
+  // The file is in the models folder at the right size.
+  installed: boolean;
+  // This is the model speech recognition is using.
+  active: boolean;
+  downloading: boolean;
+}
+
+export type ModelProgressState = "downloading" | "verifying" | "done" | "cancelled" | "error";
+
+export interface ModelProgress {
+  id: string;
+  state: ModelProgressState;
+  downloaded: number;
+  total: number;
+  // An error, or a note for the person such as "Restart WhimprFlow to start using it."
+  message: string | null;
+}
+
+export async function listModels(): Promise<ModelInfo[]> {
+  try {
+    return await invoke<ModelInfo[]>("list_models");
+  } catch {
+    return [];
+  }
+}
+
+export async function downloadModel(id: string): Promise<void> {
+  await invoke<void>("download_model", { id });
+}
+
+export async function cancelModelDownload(): Promise<void> {
+  try {
+    await invoke<boolean>("cancel_model_download");
+  } catch {
+    /* nothing running */
+  }
+}
+
+export async function onModelProgress(cb: (p: ModelProgress) => void): Promise<() => void> {
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    return await listen<ModelProgress>("whimpr://models/progress", (e) => cb(e.payload));
   } catch {
     return () => {};
   }

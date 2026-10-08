@@ -2,6 +2,7 @@ import { useState } from "react";
 import { font } from "../tokens/values";
 import { theme } from "./theme";
 import { Button, Card, Dot, PageTitle, Segmented } from "./ui";
+import { ModelsCard } from "./ModelsCard";
 import {
   requestAccessibility,
   requestInputMonitoring,
@@ -146,6 +147,8 @@ export function SettingsPane({
   return (
     <div style={{ maxWidth: 720 }}>
       <PageTitle>Settings</PageTitle>
+
+      <ModelsCard />
 
       <Card style={{ marginBottom: 16 }}>
         <SectionTitle sub="Where your dictation is cleaned up before it's typed.">Cleanup Engine</SectionTitle>

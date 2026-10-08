@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { font, palette } from "../tokens/values";
 import { theme } from "./theme";
+import { ModelsCard } from "./ModelsCard";
 import {
   requestAccessibility,
   requestMicrophone,
@@ -201,6 +202,14 @@ export function Onboarding({
           required={false}
           onGrant={() => requestInputMonitoring()}
         />
+
+        {/* Not a gate: permissions can be granted while the model downloads. */}
+        {!status.has_asr_model && (
+          <ModelsCard
+            intro="WhimprFlow also needs a speech model to hear you. Pick one to download now (you can add the other later in Settings); it runs on this Mac and resumes if your connection drops."
+            onChanged={refresh}
+          />
+        )}
 
         <button
           onClick={onEnter}

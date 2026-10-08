@@ -613,6 +613,17 @@ pub fn dictionary_add(correct: String, mishears: Vec<String>) {
     }
 }
 
+/// Where speech models live (the same folder the Windows loader reads).
+pub fn models_dir() -> std::path::PathBuf {
+    dict_path().with_file_name("models")
+}
+
+/// The Windows engine is loaded once at launch and can't be swapped yet, so a model
+/// downloaded now is used after a restart. `Ok(false)` tells the UI to say so.
+pub fn reload_asr_model() -> Result<bool, String> {
+    Ok(false)
+}
+
 pub fn brain_learn(pairs: Vec<(String, String)>) {
     if let Some(m) = BRAIN.get() {
         let mut brain = m.lock().unwrap();

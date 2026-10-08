@@ -18,6 +18,7 @@ whimpr-ipc = { path = "../crates/whimpr-ipc" }
 whimpr-audio = { path = "../crates/whimpr-audio" }
 whimpr-asr = { path = "../crates/whimpr-asr" }
 whimpr-vad = { path = "../crates/whimpr-vad" }
+whimpr-models = { path = "../crates/whimpr-models" }
 whimpr-cleanup = { path = "../crates/whimpr-cleanup" }
 strsim = "0.11"
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }

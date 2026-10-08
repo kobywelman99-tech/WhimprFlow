@@ -182,7 +182,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 - [x] `whimpr_core::asr`: `AsrOptions { prompt }`, `AsrEngine::transcribe_with` (default ignores the options, so Parakeet can skip the prompt), `AsrSlot` (a swappable `RwLock<Option<Arc<dyn AsrEngine>>>`; a dictation holds its own `Arc`, so a swap never interrupts one in flight) and `install` (warm up, then publish; a failed warm-up is reported but the engine is still used). 10 tests with fake engines, including swapping while 8 threads read
 - [x] `WhisperEngine`: `warmup()` (one decode over 1.1 s of silence) and `transcribe_with`. `hotkey.rs` uses the slot everywhere (finalize, live preview, calibration), clears `ASR_MODEL_MISSING` when an engine arrives, and logs the warm-up time. The eval harness now uses the core trait instead of its own copy (a review suggestion)
 - [x] **Behavior unchanged, measured against the exact commit before this task:** 13/13 identical transcripts on the smoke set, mean WER 0.075 → 0.075, ASR p50 63 → 63 ms
-- [x] **Warm-up benefit measured, and it is small on `base.en`:** first decode about 99 ms cold vs 92 ms warm (3 runs each, within noise), for a one-time 51 ms at launch. The gain should be larger for `large-v3-turbo`, but that model isn't installed here, so **that is unmeasured**. `cargo run --release -p whimpr-asr --example cold_vs_warm -- <model> <wav> [--warm]` reproduces it
+- [x] **Warm-up benefit measured, and it is modest:** on `base.en` the first decode is about 99 ms cold vs 92 ms warm (within noise) for a one-time 51 ms at launch; on `large-v3-turbo` (downloaded in Task 7) about 533 ms cold vs 471 ms warm (3 runs each; one cold outlier at 601 ms) for a one-time 445 ms at launch. Steady-state turbo is about 470 ms for an 11 s clip against about 90 ms for `base.en`. `cargo run --release -p whimpr-asr --example cold_vs_warm -- <model> <wav> [--warm]` reproduces it
 - [ ] Koby: with `./dev.sh`, check the log shows "ASR model loaded and warmed (… ms)" and that dictation works as before. If you install `large-v3-turbo`, run the example above with it to see the real cold-start cost
 - [ ] Not changed: the live preview still decodes without padding, so for 0.6-1.0 s of speech it shows nothing (whisper's one-second minimum)
 
@@ -191,10 +191,21 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 ### Task 7: Model download manager
 **Description:** Registry of models (id, file name, URL, size, **SHA-256**, role) in `whimpr-core`; hashes taken from Hugging Face's LFS metadata and verified against a real download once. Downloader (`.part` file, HTTP Range resume, hash check, atomic rename, cancel, clear errors for offline / disk full / hash mismatch / 404) with `reqwest` blocking (`sha2` becomes a direct dep). Commands `list_models`, `download_model`, `cancel_download`; progress event `whimpr://models/progress`; `get_status` gains `has_asr_model`. On success the engine is swapped in without a relaunch (T6). Onboarding gets a Models step with progress: **Fast `base.en` 148 MB by default**, "Best `large-v3-turbo` 1.6 GB" as an upgrade. `docs/MODELS.md` is rewritten around the new flow.
 **Acceptance criteria:**
-- [ ] Tests against a local fake HTTP server (std `TcpListener`): full download, **resume after cut**, **hash mismatch rejected and file removed**, truncated body, 404, cancel
-- [ ] First run on a machine with no model: Onboarding downloads, verifies, and dictation works without relaunch
-- [ ] Existing hand-placed models are still found and never re-downloaded
-**Verification:** `cargo test -p whimpr-core` (downloader), `cd ui && pnpm build`, **Koby:** move `~/Library/Application Support/WhimprFlow/models` aside and run first-run onboarding
+- [x] Tests against a local fake HTTP server (std `TcpListener`): full download, **resume after cut**, **hash mismatch rejected and file removed**, truncated body, 404, cancel
+- [ ] First run on a machine with no model: Onboarding downloads, verifies, and dictation works without relaunch (Koby, below)
+- [x] Existing hand-placed models are still found and never re-downloaded
+**Verification:** `cargo test -p whimpr-models` (downloader), `cd ui && pnpm build`, **Koby:** move `~/Library/Application Support/WhimprFlow/models` aside and run first-run onboarding
+
+**Progress:**
+- [x] New crate `whimpr-models` (instead of putting HTTP in `whimpr-core`, which iOS also links): registry + downloader. `.part` file, `Range` resume, SHA-256 check, atomic rename, cancel, stall detection (a short poll around each read, so cancel and stall need no socket tricks), errors written for people (offline, 404, server error, stalled, cut short, damaged, disk full, cancelled). 12 tests against a hand-rolled server that cuts, hangs, trickles, ignores `Range` and 404s; stable over 6 runs; mutation-checked (no hash check, no resume)
+- [x] **Hashes verified for real:** `base.en` matches the file already on this machine; `large-v3-turbo` (1.62 GB) was downloaded and hashes to the published value. Registry sizes and hashes are the ones Hugging Face publishes
+- [x] **Run against the real server:** killed at 62% (91.8 MB), resumed from 62% across Hugging Face's CDN redirect, verified to the published hash (`cargo run --release -p whimpr-models --example fetch -- whisper-base-en <folder>`)
+- [x] App side: `models.rs` (list, start, cancel, one download at a time, throttled `whimpr://models/progress` events), `hotkey::reload_asr_model` (load, warm, swap with no restart), `models_dir`, `Status.has_asr_model`, and the model preference order now comes from the registry. 4 tests
+- [x] UI: `ModelsCard` in Settings ("Fast" / "Best", progress, cancel, retry) and a non-blocking section on the setup screen, shown until a model is installed. `docs/MODELS.md` rewritten
+- [x] Windows: only stubs (`models_dir`, `reload_asr_model` returning "restart needed"); the engine there can't be swapped yet. **Not compiled here**
+- [ ] **Koby:** move `~/Library/Application Support/WhimprFlow/models` aside (keep a copy), launch with `./dev.sh`, and on the setup screen download "Fast". Watch the bar, confirm it finishes, then try dictating without restarting. Then try cancelling and resuming, and "Best" from Settings. I can't drive the app window from here, so none of the UI has been clicked
+- [ ] Not done: the Qwen cleanup model is still placed by hand (not part of this task)
+
 **Dependencies:** T6 · **Files:** `crates/whimpr-core/src/models.rs`, `src-tauri/src/models.rs`, `src-tauri/src/lib.rs`, `ui/src/hub/Onboarding.tsx`, `api.ts`, `docs/MODELS.md` · **Scope:** L
 
 ### Task 8: Parakeet ONNX backend
@@ -373,4 +384,5 @@ Numbers from `whimpr-eval`. **Until Koby's 30 clips exist, the only data is a sm
 | Task 4 | padding + VAD | same | 0.075 | noise clip: skipped in 7 ms, nothing pasted. VAD cost p50 5 ms, p95 8 ms. ASR p95 1172 → 89 ms. Speech clips unchanged in WER (transcriptions of trimmed clips can differ slightly) |
 | Task 4 follow-up | VAD start 0.3 / continue 0.2 / blip 4 frames; one-word hallucination entries removed | 8 `say` one-word clips + the smoke set | words: 0.125 mean (the "ok" row is my reference saying "ok" vs whisper's "Okay") | "bye", "you", "no" were skipped before; now "Bye." "You." "No." Silence, room tone and noise still skipped; earlier smoke-set WER unchanged at 0.075 |
 | Task 6 | swappable engine trait (no behavior change) | smoke set vs the commit just before | 0.075 → 0.075 | 13/13 transcripts identical; ASR p50 63 → 63 ms. Warm-up: first decode ~99 → ~92 ms on base.en (noise-level) |
+| Task 7 | models measured while verifying downloads | jfk.wav (11 s), M-series Metal | n/a | steady-state decode: base.en ~90 ms, large-v3-turbo ~470 ms. Warm-up: base.en 99 -> 92 ms, turbo 533 -> 471 ms |
 
