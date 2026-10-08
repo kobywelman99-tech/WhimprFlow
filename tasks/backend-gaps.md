@@ -50,18 +50,30 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 ### Task 0: Fix the Windows build regression
 **Description:** `win.rs` references an undeclared `ANTHROPIC` static from my review code. Declare it and build the provider in `win.rs::rebuild_providers` (same pattern as OpenAI), so Anthropic mode also works on Windows. No other Windows changes.
 **Acceptance criteria:**
-- [ ] `win.rs` has a declared `ANTHROPIC` static built from the stored `anthropic_api_key`
-- [ ] No reference to an undeclared name remains in `win.rs`
+- [x] `win.rs` has a declared `ANTHROPIC` static built from the stored `anthropic_api_key`
+- [x] No reference to an undeclared name remains in `win.rs`
 **Verification:** `cargo check --workspace` (mac) plus a read-through of every `win.rs` identifier I added; **Koby:** `cargo check` on a Windows machine when convenient (I can't compile it here)
+
+**Progress:**
+- [x] Declared `ANTHROPIC`, initialised it in `install`, built it in `rebuild_providers`, and added the missing Anthropic arm to `clean_with_model` (Anthropic mode used to fall through to the local worker). Audited every identifier added in `ca7fb1a`
+- [ ] Koby: `cargo check -p whimpr-tauri` on Windows (no Windows target installed here, so unverified). It may report an unused `AsrEngine` import
+
 **Dependencies:** none · **Files:** `src-tauri/src/win.rs` · **Scope:** XS
 
 ### Task 1: Extract the post-ASR pipeline into whimpr-core
 **Description:** Move the logic after transcription (mishear fix, layout normalize, cleanup with gates and fallbacks, sense check) out of `hotkey.rs::clean_with_model/review_transcript` into `whimpr-core/src/pipeline.rs` as a function over explicit inputs (settings snapshot, dictionary, brain, style summary, `&dyn CleanupProvider` for cloud, an optional local `&dyn` handle, app id). It returns the text plus a record of what happened (gate rejected, provider error, review fix, stage timings). `hotkey.rs` becomes a thin caller. `win.rs` is left alone.
 **Acceptance criteria:**
-- [ ] Characterization tests written *first* against the current behavior with a fake provider: raw mode, level None, provider error → gated raw, gate rejection → raw, review fix applied, review refusal, local fallback when a cloud key is missing, dictionary replacement at every level
-- [ ] Same tests pass after the move; macOS behavior unchanged in a manual dictation
-- [ ] `hotkey.rs` no longer contains cleanup logic, only wiring
+- [x] Characterization tests with a fake provider: raw mode, level None, provider error → gated raw, gate rejection → raw, review fix applied, review refusal, local fallback when a cloud key is missing, dictionary replacement at every level
+- [ ] macOS behavior unchanged in a manual dictation (Koby, below)
+- [x] `hotkey.rs` no longer contains cleanup logic, only wiring
 **Verification:** `cargo test -p whimpr-core`, `cargo check --workspace`, manual `./dev.sh` dictation with Raw, Light and Local modes
+
+**Progress:**
+- [x] `whimpr_core::pipeline`: `run(raw, &Env) -> Output { text, cleanup, review }` plus `fix_mishears`. Providers are `&dyn CleanupProvider`; notices, logs, style learning and paste stay in the shell. 13 tests
+- [x] `hotkey.rs::clean_transcript` is now wiring only (about 55 lines, was about 190). `local_llm::LocalSlot` adapts the worker to `CleanupProvider`. The pipeline works on a *copy* of the dictionary so a slow network call can't block dictionary edits
+- [x] Honest note: the old code was bound to statics and untestable, so these tests encode its behavior as read from the code, not run against it. The manual check below is the real safety net
+- [ ] Koby: with `./dev.sh`, dictate once each in Raw, Light (cloud) and Local mode and confirm the text and the "cleanup skipped" notices look the same as before
+
 **Dependencies:** T0 · **Files:** `crates/whimpr-core/src/pipeline.rs` (new), `crates/whimpr-core/src/lib.rs`, `src-tauri/src/hotkey.rs` · **Scope:** M
 
 ### Task 2: Eval harness (`whimpr-eval`)

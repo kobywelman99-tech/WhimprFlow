@@ -5,6 +5,27 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
+
+use whimpr_core::cleanup::{CleanupMsg, CleanupProvider, ProviderId};
+
+/// The shared worker slot as a cleanup provider, so the pipeline treats the
+/// on-device model like any other. Locks only for the length of one request.
+pub struct LocalSlot<'a>(pub &'a Mutex<Option<LocalWorker>>);
+
+impl CleanupProvider for LocalSlot<'_> {
+    fn id(&self) -> ProviderId {
+        ProviderId::Local
+    }
+
+    fn complete(&self, messages: &[CleanupMsg]) -> anyhow::Result<String> {
+        let mut slot = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match slot.as_mut() {
+            Some(worker) => worker.cleanup(messages),
+            None => anyhow::bail!("the on-device model isn't ready"),
+        }
+    }
+}
 
 pub struct LocalWorker {
     child: Child,

@@ -16,6 +16,7 @@ pub mod cleanup;
 pub mod credentials;
 pub mod diagnostics;
 pub mod dictionary;
+pub mod pipeline;
 pub mod review;
 pub mod settings;
 pub mod state;

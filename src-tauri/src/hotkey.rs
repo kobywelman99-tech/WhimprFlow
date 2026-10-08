@@ -33,7 +33,7 @@ mod imp {
     use tauri::{AppHandle, Emitter};
     use whimpr_core::state::{Action, BarState};
     use whimpr_core::{
-        AsrEngine, CleanupContext, CleanupMode, CleanupProvider, Input, PipelineEvent, StateMachine,
+        AsrEngine, CleanupMode, Input, PipelineEvent, StateMachine,
         TriggerToken,
     };
     use whimpr_ipc::BindingId;
@@ -308,14 +308,11 @@ mod imp {
         }
     }
 
-    /// Fix known mishears in a raw transcript: the dictionary's "also heard as"
-    /// entries, then word pairs the brain has seen repeat.
+    /// Fix known mishears in a raw transcript (see `whimpr_core::pipeline::fix_mishears`).
     fn fix_mishears(raw: &str) -> String {
-        let fixed = DICTIONARY
-            .get()
-            .map(|m| m.lock_recover().apply_replacements(raw))
-            .unwrap_or_else(|| raw.to_string());
-        BRAIN.get().map(|m| m.lock_recover().correct(&fixed)).unwrap_or(fixed)
+        let dictionary = DICTIONARY.get().map(|m| m.lock_recover());
+        let brain = BRAIN.get().map(|m| m.lock_recover());
+        whimpr_core::pipeline::fix_mishears(raw, dictionary.as_deref(), brain.as_deref())
     }
 
     /// The user's spellings (dictionary + words the brain has seen misheard) as a
@@ -456,73 +453,15 @@ mod imp {
         }
     }
 
-    /// Clean a raw transcript per the current settings (mode + level), feeding in the
-    /// dictionary vocabulary relevant to this utterance. Falls back to raw whenever
-    /// cleanup is off, the provider is unavailable, it errors, or the gates reject it.
+    /// Clean a raw transcript and give it the sense check. The logic lives in
+    /// `whimpr_core::pipeline` (shared with the eval harness); this wires in the
+    /// statics and tells the user when cleanup couldn't run.
     fn clean_transcript(app: &AppHandle, raw: &str) -> String {
-        let cleaned = clean_with_model(app, raw);
-        review_transcript(raw, cleaned)
-    }
+        use whimpr_core::pipeline::{self, CleanupStep, Env, Providers, ReviewStep};
 
-    /// The last read: does the message make sense? Repairs only words that don't, using
-    /// what was heard. Cloud models only; any failure keeps the message as it is.
-    fn review_transcript(heard: &str, draft: String) -> String {
         let settings = current_settings();
-        if !settings.review_enabled
-            || matches!(settings.cleanup_mode, CleanupMode::Raw)
-            || settings.cleanup_level.bypasses_llm()
-        {
-            return draft;
-        }
-        let vocab = DICTIONARY
-            .get()
-            .map(|d| d.lock_recover().prefilter(heard, 15))
-            .unwrap_or_default();
-        let outcome = match settings.cleanup_mode {
-            CleanupMode::OpenAi => OPENAI
-                .get()
-                .and_then(|m| m.lock_recover().as_ref().map(|p| whimpr_core::review::run(p, heard, &draft, None, &vocab))),
-            CleanupMode::Anthropic => ANTHROPIC
-                .get()
-                .and_then(|m| m.lock_recover().as_ref().map(|p| whimpr_core::review::run(p, heard, &draft, None, &vocab))),
-            _ => None,
-        };
-        match outcome {
-            Some(o) if o.changed => {
-                let fixes: Vec<String> = o.changes.iter().map(|c| format!("{} → {}", c.from, c.to)).collect();
-                eprintln!("[whimpr] SENSE CHECK fixed: {}", fixes.join(", "));
-                o.text
-            }
-            Some(o) => {
-                if let Some(why) = o.rejected {
-                    eprintln!("[whimpr] sense check: {why}");
-                }
-                draft
-            }
-            None => draft,
-        }
-    }
-
-    fn clean_with_model(app: &AppHandle, raw: &str) -> String {
-        let settings = current_settings();
-        let level = settings.cleanup_level;
-        if matches!(settings.cleanup_mode, CleanupMode::Raw) || level.bypasses_llm() {
-            return raw.to_string();
-        }
-        // Turn explicit spoken layout cues ("new line", "new paragraph") into break
-        // markers up front — the model passes an opaque marker through reliably but
-        // mangles the literal cue words. The model sees `raw` (with markers); the gate
-        // and any raw fallback use `raw_out` (markers restored to real breaks) so we
-        // never paste a "[[NL]]" token or lose an explicit break.
-        let raw_norm = whimpr_core::cleanup::pre_normalize_layout(raw);
-        let raw = raw_norm.as_str();
-        let raw_out = whimpr_core::cleanup::post_process(&raw_norm);
-        let vocab = DICTIONARY
-            .get()
-            .map(|d| d.lock_recover().prefilter(raw, 15))
-            .unwrap_or_default();
         let app_bundle_id = TARGET_APP.get().and_then(|m| m.lock_recover().clone());
-        if let Some(app) = app_bundle_id.as_deref() {
+        if let (false, Some(app)) = (matches!(settings.cleanup_mode, CleanupMode::Raw), app_bundle_id.as_deref()) {
             eprintln!("[whimpr] cleanup target app: {app}");
         }
         let style_mode = whimpr_core::resolve_style_mode(settings.format_mode, app_bundle_id.as_deref());
@@ -531,79 +470,49 @@ mod imp {
         } else {
             None
         };
-        let ctx = CleanupContext {
-            level,
-            vocab,
-            app_bundle_id,
-            style_summary,
-            format_mode: settings.format_mode,
-            ..Default::default()
+        // A copy, so a slow network call never holds up editing the dictionary.
+        let dictionary = DICTIONARY.get().map(|m| m.lock_recover().clone()).unwrap_or_default();
+
+        let openai = OPENAI.get().map(|m| m.lock_recover());
+        let anthropic = ANTHROPIC.get().map(|m| m.lock_recover());
+        let local = LOCAL.get().filter(|m| m.lock_recover().is_some()).map(crate::local_llm::LocalSlot);
+        let providers = Providers {
+            openai: openai.as_ref().and_then(|g| g.as_ref()).map(|p| p as &dyn whimpr_core::CleanupProvider),
+            anthropic: anthropic.as_ref().and_then(|g| g.as_ref()).map(|p| p as &dyn whimpr_core::CleanupProvider),
+            local: local.as_ref().map(|p| p as &dyn whimpr_core::CleanupProvider),
         };
-        // Run the on-device model with the same prompt + per-app formatting.
-        let run_local = || -> Option<anyhow::Result<String>> {
-            LOCAL.get().and_then(|m| {
-                m.lock_recover().as_mut().map(|w| {
-                    // System prompt + few-shot demonstration turns + the transcript,
-                    // so the on-device model actually produces newlines/lists and
-                    // resolves self-corrections instead of just being told to.
-                    let messages = whimpr_core::cleanup::build_messages(raw, &ctx);
-                    w.cleanup(&messages)
-                })
-            })
-        };
-        // Selected provider, falling back to local when a cloud key can't be read
-        // (so cleanup still runs) — and Local mode uses the worker directly.
-        let result: Option<anyhow::Result<String>> = match settings.cleanup_mode {
-            CleanupMode::OpenAi => OPENAI
-                .get()
-                .and_then(|m| m.lock_recover().as_ref().map(|p| p.cleanup(raw, &ctx)))
-                .or_else(run_local),
-            CleanupMode::Anthropic => ANTHROPIC
-                .get()
-                .and_then(|m| m.lock_recover().as_ref().map(|p| p.cleanup(raw, &ctx)))
-                .or_else(run_local),
-            CleanupMode::Local => run_local(),
-            CleanupMode::Raw => None,
-        };
-        match result {
-            Some(Ok(cleaned)) => {
-                // Deterministic safety net: convert any leftover spoken layout cue the
-                // model missed into real line breaks, strip stray code fences, cap blank
-                // lines. Guarantees no "new line"/"new paragraph" word reaches the cursor.
-                let cleaned = whimpr_core::cleanup::post_process(&cleaned);
-                if whimpr_core::cleanup::evaluate_gates(&raw_out, &cleaned, level).passed() {
-                    cleaned
-                } else {
-                    eprintln!("[whimpr] cleanup gate rejected the edit — pasting raw");
-                    raw_out
-                }
-            }
-            Some(Err(e)) => {
-                eprintln!("[whimpr] cleanup failed ({e}) — pasting raw");
-                raw_out
-            }
-            None => {
-                if matches!(settings.cleanup_mode, CleanupMode::Local) {
-                    crate::diag::notice(
-                        app,
-                        "Cleanup skipped — pasted raw",
-                        "The on-device cleanup model isn't ready yet, so this dictation was \
-                         pasted exactly as spoken, with no cleanup applied. It should be ready \
-                         shortly; if this keeps happening, try switching Cleanup Mode to \
-                         OpenAI or Anthropic in Settings.",
-                    );
-                } else {
-                    crate::diag::notice(
-                        app,
-                        "Cleanup skipped — pasted raw",
-                        "No API key is set for the selected cleanup provider, so this \
-                         dictation was pasted exactly as spoken. Add a key under Settings → \
-                         Cleanup Engine to enable cleanup.",
-                    );
-                }
-                raw_out
-            }
+        let env = Env { settings: &settings, dictionary: &dictionary, style_summary, app_bundle_id, providers };
+        let out = pipeline::run(raw, &env);
+
+        match &out.cleanup {
+            CleanupStep::GateRejected(_) => eprintln!("[whimpr] cleanup gate rejected the edit — pasting raw"),
+            CleanupStep::Failed(e) => eprintln!("[whimpr] cleanup failed ({e}) — pasting raw"),
+            CleanupStep::Unavailable { local: true } => crate::diag::notice(
+                app,
+                "Cleanup skipped — pasted raw",
+                "The on-device cleanup model isn't ready yet, so this dictation was \
+                 pasted exactly as spoken, with no cleanup applied. It should be ready \
+                 shortly; if this keeps happening, try switching Cleanup Mode to \
+                 OpenAI or Anthropic in Settings.",
+            ),
+            CleanupStep::Unavailable { local: false } => crate::diag::notice(
+                app,
+                "Cleanup skipped — pasted raw",
+                "No API key is set for the selected cleanup provider, so this \
+                 dictation was pasted exactly as spoken. Add a key under Settings → \
+                 Cleanup Engine to enable cleanup.",
+            ),
+            CleanupStep::Skipped | CleanupStep::Cleaned => {}
         }
+        match &out.review {
+            ReviewStep::Fixed(changes) => {
+                let fixes: Vec<String> = changes.iter().map(|c| format!("{} → {}", c.from, c.to)).collect();
+                eprintln!("[whimpr] SENSE CHECK fixed: {}", fixes.join(", "));
+            }
+            ReviewStep::Refused(why) => eprintln!("[whimpr] sense check: {why}"),
+            ReviewStep::NotRun | ReviewStep::Unchanged => {}
+        }
+        out.text
     }
 
     /// While recording, periodically re-decode the audio captured so far with
