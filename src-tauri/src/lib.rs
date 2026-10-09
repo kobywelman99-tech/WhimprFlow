@@ -14,8 +14,6 @@ mod local_llm;
 mod models;
 mod paste;
 mod permissions;
-#[cfg(target_os = "windows")]
-mod win;
 
 use serde::Serialize;
 use tauri::{
@@ -392,18 +390,10 @@ fn get_last_error() -> Option<diag::ErrorDto> {
 /// Where cloud cleanup API keys live — see `whimpr_core::credentials` for why
 /// this is a restricted-permission local file rather than the OS keychain.
 fn credentials_path() -> std::path::PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var("APPDATA").unwrap_or_default();
-        std::path::PathBuf::from(base).join("WhimprFlow").join("credentials.json")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        std::path::PathBuf::from(home)
-            .join("Library/Application Support/WhimprFlow")
-            .join("credentials.json")
-    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    std::path::PathBuf::from(home)
+        .join("Library/Application Support/WhimprFlow")
+        .join("credentials.json")
 }
 
 fn has_key(account: &str) -> bool {

@@ -1,6 +1,6 @@
 # TODO: Close the desktop backend gaps
 
-Plan and rationale are in this file. Layout follows `tasks/todo.md`. Branch: `ios-app`. Windows is macOS-first (see Decisions).
+Plan and rationale are in this file. Layout follows `tasks/todo.md`. Branch: `ios-app`. Desktop is macOS-only; Windows was removed on 2026-10-08 (see Decisions).
 
 
 
@@ -25,7 +25,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 **Already built, will not be redone:** hands-free lock (double-tap, `machine.rs`), dictionary → whisper `initial_prompt` (`whisper_prompt()`), clipboard save/restore (text only), history, autolearn, cleanup gates.
 
 ## Decisions (from you)
-- **macOS only for now.** `win.rs` is untouched except the build fix in Task 0. Shared logic moves into `whimpr-core` so Windows can adopt it later.
+- **macOS only.** (2026-10-08: Windows support was then removed entirely: `win.rs`, `tauri.windows.conf.json`, the LLVM preflight script and the Windows icons are deleted. Every "Windows" item below is void.) `win.rs` was untouched except the build fix in Task 0. Shared logic moves into `whimpr-core` so Windows can adopt it later.
 - **First-run model: `base.en` (148 MB)**, with `large-v3-turbo` (1.6 GB) offered as an upgrade.
 - Parakeet is a CPU ONNX backend; the Windows default flip is **gated on your own Windows eval run** (Phase 1 note below).
 
@@ -56,7 +56,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 
 **Progress:**
 - [x] Declared `ANTHROPIC`, initialised it in `install`, built it in `rebuild_providers`, and added the missing Anthropic arm to `clean_with_model` (Anthropic mode used to fall through to the local worker). Audited every identifier added in `ca7fb1a`
-- [ ] Koby: `cargo check -p whimpr-tauri` on Windows (no Windows target installed here, so unverified). It may report an unused `AsrEngine` import
+- [x] ~~Koby: `cargo check -p whimpr-tauri` on Windows~~ void, Windows removed (no Windows target installed here, so unverified). It may report an unused `AsrEngine` import
 
 **Dependencies:** none · **Files:** `src-tauri/src/win.rs` · **Scope:** XS
 
@@ -228,7 +228,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 - [x] **Run for real, headlessly:** launched the actual debug app with isolated empty home folders and real models in four configurations and read its log. That run **found a bug in my code**: with Parakeet chosen and installed, the app loaded whisper, because the model thread started before the settings were loaded and read the defaults. Fixed structurally (the engine is passed into `reload_asr_model` instead of read from a global, the choice of files is the tested pure function `choose_engine`, and the thread starts after settings load). After the fix: whisper-only loads and warms (83 ms); Parakeet chosen loads Parakeet (64 ms); Parakeet chosen but missing falls back to whisper with a message; nothing installed reports it
 - [x] **UI rendered and checked in headless Chrome** with Tauri's `invoke` mocked (a DevTools-protocol script, kept out of the repo): the model card shows Fast "In use", Best downloading with a live progress bar and Cancel (driven by a mocked progress event), and Parakeet with "Use"; the Acknowledgements card opens and scrolls. This proves the layout and the progress-event wiring, **not** the backend behind it
 - [ ] Could not do: click through the real app window. UI scripting sees no windows here (Accessibility isn't granted to this process) and screenshots of other apps are blocked, so a real in-app download, the Use button's effect and the live engine swap on a settings change have **not** been exercised against the real backend. The Windows target can't be type-checked here either (native dependencies need Microsoft's SDK; I tried and removed the target again)
-- [ ] Koby: Windows `cargo check`; the Windows engine can't be swapped yet, so Parakeet there needs the shared pipeline first
+- [x] ~~Koby: Windows `cargo check`;~~ void, Windows removed; the Windows engine can't be swapped yet, so Parakeet there needs the shared pipeline first
 - [ ] Open before release: NVIDIA Parakeet is CC-BY-4.0 and needs attribution in the app's acknowledgements (added to the existing item)
 
 **Decision for Koby (from the numbers, not made for you):** on this Mac Parakeet is about 6x faster than Best (turbo) at the p50 and close in accuracy, but weaker with names (no dictionary prompt) and a little brittle on one-word clips. The plan keeps whisper as the default and Parakeet opt-in; say if you want that changed after you have run it on your own voice.
@@ -333,7 +333,7 @@ WhimprFlow's desktop hot path (Fn up → resample → whisper → mishear fix �
 ## Blocked on you (so I can move on)
 1. **Record the ~30 clips** (Appendix A) → `eval/fixtures/`. Until then the harness runs only on synthetic audio and there are **no baseline numbers**.
 2. **Approve golden expected text** for LLM-dependent clips after the first real run.
-3. **Windows:** `cargo check` after Task 0; later run `whimpr-eval` there to decide the Parakeet default.
+3. ~~Windows~~ void: Windows was removed on 2026-10-08.
 4. **Models dir swap** for the Task 7 first-run test.
 5. API key available in the environment for eval (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`); `--provider none` works without one.
 

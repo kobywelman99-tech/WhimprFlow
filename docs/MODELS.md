@@ -60,9 +60,7 @@ Model: NVIDIA Parakeet TDT 0.6B v2, ONNX export by istupakov, licensed
 If more than one whisper model is installed, the most accurate present one is used, in this order:
 `ggml-large-v3-turbo.bin`, `ggml-medium.en.bin`, `ggml-small.en.bin`, `ggml-base.en.bin`.
 
-**Windows** doesn't use the downloader yet; place the file by hand (below), then restart.
-
-### Placing a model by hand (any platform, or if you're offline)
+### Placing a model by hand (if you're offline)
 
 Download one file and save it with its exact name:
 
@@ -77,8 +75,7 @@ https://huggingface.co/ggerganov/whisper.cpp/resolve/main/<exact filename>
 | `ggml-medium.en.bin` | 1.53 GB | not downloadable in-app; recognised if you place it |
 | `ggml-small.en.bin` | 488 MB | not downloadable in-app; recognised if you place it |
 
-Place it at `~/Library/Application Support/WhimprFlow/models/` (macOS) or
-`%APPDATA%\WhimprFlow\models\` (Windows). Any other filename in that repo (quantized
+Place it at `~/Library/Application Support/WhimprFlow/models/`. Any other filename in that repo (quantized
 `-q5_1`/`-q8_0` variants, multilingual models, CoreML bundles, `tiny.en`) is **not** recognised
 today: renaming one won't work, because the file format has to match too.
 
@@ -113,8 +110,7 @@ If both are present, WhimprFlow prefers the 4B one. Then in the Hub, set
 
 ## Checking it worked
 
-Launch WhimprFlow from a terminal (`./dev.sh` on macOS, or run the built
-`.exe` from PowerShell on Windows). You should see:
+Launch WhimprFlow from a terminal (`./dev.sh`). You should see:
 
 ```
 [whimpr] ASR model ggml-base.en.bin loaded and warmed (… ms) — ready to transcribe

@@ -22,13 +22,6 @@ impl WhisperEngine {
             .map_err(|e| anyhow::anyhow!("failed to load whisper model: {e}"))?;
         Ok(Self { ctx })
     }
-
-    /// Like [`AsrEngine::transcribe`], but primes whisper with `prompt` (the
-    /// user's vocabulary), which nudges it toward those spellings. Windows still calls
-    /// this directly; new code uses [`AsrEngine::transcribe_with`].
-    pub fn transcribe_with_prompt(&self, pcm16k: &[f32], prompt: Option<&str>) -> anyhow::Result<Transcript> {
-        self.transcribe_inner(pcm16k, prompt)
-    }
 }
 
 /// Build a whisper `initial_prompt` from dictionary spellings: a short comma

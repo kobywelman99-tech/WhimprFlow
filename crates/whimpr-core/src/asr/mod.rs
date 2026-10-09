@@ -1,6 +1,5 @@
 //! The ASR seam. Per-OS backends implement [`AsrEngine`]: FluidAudio on the Apple
-//! Neural Engine (macOS primary) and ONNX-Runtime Parakeet (Windows primary, macOS
-//! fallback). The core only ever sees this trait; the engine choice is made behind it.
+//! Neural Engine (macOS primary) and ONNX-Runtime Parakeet (opt-in, CPU). The core only ever sees this trait; the engine choice is made behind it.
 
 use std::sync::{Arc, RwLock};
 

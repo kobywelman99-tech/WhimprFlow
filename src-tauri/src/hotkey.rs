@@ -1153,17 +1153,8 @@ pub use imp::{
     stats_summary, stop_dictation, style_summaries, update_settings,
 };
 
-// Windows uses the real (but unverified) platform layer in `crate::win`.
-#[cfg(target_os = "windows")]
-pub use crate::win::{
-    brain_learn, brain_reset, brain_summary, calibration_record_start, calibration_record_stop,
-    cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,
-    dictionary_remove, history, install, models_dir, rebuild_providers, reload_asr_model, reset_style,
-    stats_summary, stop_dictation, style_summaries, update_settings,
-};
-
 // Other platforms (Linux, etc.): inert stubs so the crate still builds.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 mod other {
     pub fn install(_app: tauri::AppHandle) {}
     pub fn current_settings() -> whimpr_core::Settings {
@@ -1210,7 +1201,7 @@ mod other {
     }
     pub fn reset_style(_mode: whimpr_core::StyleMode) {}
 }
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 pub use other::{
     brain_learn, brain_reset, brain_summary, calibration_record_start, calibration_record_stop,
     cancel_dictation, current_settings, dictionary_add, dictionary_entries, dictionary_learn,

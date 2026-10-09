@@ -1,5 +1,7 @@
 # WhimprFlow — Build Spec
 
+> **Status (2026-10-08): the desktop app targets macOS only.** Windows items in this spec are deferred.
+
 > Synthesized 2026-07-17 from a 15-agent research workflow (10 recon tracks, completeness critic, 3 gap-fill agents, synthesis) covering: a teardown of the actual Wispr Flow 1.6.7 macOS bundle (real SCSS design tokens), the Wispr help center + changelog, user reviews/Reddit/X, OSS clone source (OpenSuperWhisper/VoiceInk/Handy/Whispering), and local model benchmarks on M-series hardware. Claims are marked OBSERVED (sourced) vs INFERRED (educated guess).
 >
 > Ground rules: exact-behavior clone, cosmetic deltas only (name/colors/fonts/strings — see UI spec §H). Everything re-implemented from scratch; zero copied code or assets. Local-first (Parakeet ASR + Qwen3-4B cleanup) with a Claude Haiku toggle.

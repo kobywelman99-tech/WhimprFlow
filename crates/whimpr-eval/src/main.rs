@@ -97,14 +97,7 @@ fn models_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("WHIMPR_MODELS_DIR") {
         return dir.into();
     }
-    #[cfg(target_os = "macos")]
-    {
-        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support/WhimprFlow/models")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("WhimprFlow/models")
-    }
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support/WhimprFlow/models")
 }
 
 /// The same preference order the app uses (`hotkey.rs::model_path`).

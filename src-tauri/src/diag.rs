@@ -26,11 +26,9 @@ impl<T> PoisonRecover<T> for Mutex<T> {
 
 #[cfg(target_os = "macos")]
 const PLATFORM: whimpr_core::diagnostics::Platform = whimpr_core::diagnostics::Platform::MacOs;
-#[cfg(target_os = "windows")]
-const PLATFORM: whimpr_core::diagnostics::Platform = whimpr_core::diagnostics::Platform::Windows;
 // Diagnostics aren't wired up on other targets (see hotkey::other stubs), but
 // this constant must still exist for the crate to build there.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 const PLATFORM: whimpr_core::diagnostics::Platform = whimpr_core::diagnostics::Platform::MacOs;
 
 const OVERLAY_LABEL: &str = "whimpr_bar";
@@ -54,7 +52,7 @@ struct BarPayload {
 
 /// Report a failure: log it, push the pill to the `error` state, broadcast
 /// the message to every window, and remember it for [`last_error`].
-#[allow(dead_code)] // used on macOS/Windows; inert-but-present on other targets
+#[allow(dead_code)] // used on macOS; inert-but-present on other targets
 pub fn report(app: &AppHandle, failure: InjectionFailure) {
     let diag = failure.diagnose(PLATFORM);
     eprintln!("[whimpr] ⚠ {}: {}", diag.headline, diag.detail);

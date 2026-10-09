@@ -11,7 +11,7 @@
 //! It auto-exits with success after 3 Fn presses, or times out after 60s.
 //!
 //! macOS-only demo; other platforms get a stub `main` so the workspace still
-//! builds (see `win.rs`/`hotkey.rs` for the real Windows push-to-talk hook).
+//! builds (see `hotkey.rs` for the real push-to-talk hook).
 
 #[cfg(not(target_os = "macos"))]
 fn main() {

@@ -261,8 +261,7 @@ pub fn prompt_accessibility() -> bool {
     true
 }
 
-/// Windows has no TCC status to read; report "authorized" (3) — the microphone
-/// row there is not gated on a system privacy grant.
+/// Inert stub for non-macOS builds: report "authorized" (3).
 #[cfg(not(target_os = "macos"))]
 pub fn microphone_authorization() -> i64 {
     3

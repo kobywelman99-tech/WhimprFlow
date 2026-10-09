@@ -39,7 +39,7 @@ impl CredentialStore {
 
     /// Persist to `path`, restricting it to the current user (`0600`) on
     /// Unix so the plaintext key isn't world/group readable. Best-effort on
-    /// other platforms (Windows ACLs already default to the owning user).
+    /// other platforms.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

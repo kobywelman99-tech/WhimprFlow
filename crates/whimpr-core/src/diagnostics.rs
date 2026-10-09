@@ -2,7 +2,7 @@
 //!
 //! Before this module existed, every way the dictation loop could fail to
 //! deliver text — a missing macOS Accessibility grant, a stale TCC entry left
-//! by an earlier build, a failed Windows keyboard hook, silence from the mic,
+//! by an earlier build, a failed keyboard hook, silence from the mic,
 //! an empty transcript — only ever reached an `eprintln!`. That is invisible
 //! to anyone who launched the packaged app by double-clicking it rather than
 //! from a terminal, which is the default way a built app is used. Two
@@ -20,11 +20,9 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InjectionFailure {
     /// macOS: `AXIsProcessTrusted()` is false — Accessibility was never
-    /// granted (or was revoked). Windows has no equivalent gate for typing,
-    /// but reuses this variant for "mic access is blocked at the OS level".
+    /// granted (or was revoked).
     AccessibilityNotGranted,
-    /// macOS: Accessibility reads true, but the CGEventTap (or, on Windows,
-    /// the `WH_KEYBOARD_LL` hook) failed to install — most commonly a stale
+    /// macOS: Accessibility reads true, but the CGEventTap failed to install — most commonly a stale
     /// permission entry left behind by an earlier build with a different
     /// code signature, so the hotkey silently never fires.
     HotkeyTapFailed,
@@ -53,7 +51,6 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
     MacOs,
-    Windows,
 }
 
 impl InjectionFailure {
@@ -69,26 +66,12 @@ impl InjectionFailure {
                     no relaunch needed."
                     .into(),
             },
-            (AccessibilityNotGranted, Windows) => Diagnostic {
-                headline: "Microphone access blocked".into(),
-                detail: "Windows is blocking microphone access. Open Settings → Privacy & \
-                    security → Microphone and turn on \"Let desktop apps access your \
-                    microphone\", then try again."
-                    .into(),
-            },
             (HotkeyTapFailed, MacOs) => Diagnostic {
                 headline: "Fn key isn't wired up".into(),
                 detail: "Accessibility shows granted, but the key listener failed to start — \
                     usually a stale permission entry left by an earlier build. Open System \
                     Settings → Privacy & Security → Accessibility, turn WhimprFlow off and back \
                     on (or remove it with \"−\" and re-add it), then relaunch WhimprFlow."
-                    .into(),
-            },
-            (HotkeyTapFailed, Windows) => Diagnostic {
-                headline: "Right Ctrl isn't wired up".into(),
-                detail: "The keyboard hook failed to install. Relaunch WhimprFlow; if it keeps \
-                    happening, another app may be holding a global keyboard hook (some \
-                    anti-cheat or security tools do) — close it and relaunch."
                     .into(),
             },
             (ClipboardUnavailable, _) => Diagnostic {
@@ -103,12 +86,6 @@ impl InjectionFailure {
                 detail: "The microphone appears silent. Check System Settings → Privacy & \
                     Security → Microphone is on for WhimprFlow, and that the right input device \
                     is selected."
-                    .into(),
-            },
-            (NoAudioCaptured, Windows) => Diagnostic {
-                headline: "No audio came in".into(),
-                detail: "The microphone appears silent. Check Settings → Privacy & security → \
-                    Microphone allows desktop apps, and that the right input device is selected."
                     .into(),
             },
             (EmptyTranscript, _) => Diagnostic {
@@ -140,7 +117,7 @@ mod tests {
         InjectionFailure::EmptyTranscript,
         InjectionFailure::AsrUnavailable,
     ];
-    const ALL_PLATFORMS: [Platform; 2] = [Platform::MacOs, Platform::Windows];
+    const ALL_PLATFORMS: [Platform; 1] = [Platform::MacOs];
     /// A pill headline should stay short enough not to force the flow bar
     /// wider than its normal error-state width.
     const MAX_HEADLINE_LEN: usize = 40;
@@ -195,15 +172,6 @@ mod tests {
     fn asr_unavailable_points_at_models_md() {
         let d = InjectionFailure::AsrUnavailable.diagnose(Platform::MacOs);
         assert!(d.detail.contains("MODELS.md"));
-    }
-
-    #[test]
-    fn windows_wording_never_mentions_macos_settings() {
-        for &failure in &ALL_FAILURES {
-            let d = failure.diagnose(Platform::Windows);
-            assert!(!d.detail.contains("System Settings"));
-            assert!(!d.headline.contains("System Settings"));
-        }
     }
 
     #[test]

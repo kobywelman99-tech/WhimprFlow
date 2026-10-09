@@ -4,7 +4,7 @@
 //!
 //! The hook lives out-of-process so that saturating on-device inference (ASR + LLM)
 //! in the main process can never starve the low-level keyboard callback past the
-//! OS timeout — on Windows that removal is silent and unrecoverable, so isolation
+//! OS timeout — the OS can remove a slow event tap silently, so isolation
 //! plus a heartbeat/respawn (see [`SidecarToShell::Heartbeat`]) is the whole point.
 //!
 //! Because both ends are Rust, these enums are the single source of truth for the
@@ -26,7 +26,6 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[serde(rename_all = "snake_case")]
 pub enum OsKind {
     MacOS,
-    Windows,
 }
 
 /// Stable identifier for one bound action (push-to-talk, hands-free, command mode…).
@@ -90,7 +89,7 @@ impl Default for PasteOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PasteRung {
-    /// Accessibility set-selected-text (macOS AX) / UIA ValuePattern (Windows).
+    /// Accessibility set-selected-text (macOS AX).
     Accessibility,
     /// Clipboard write + synthesized paste keystroke.
     Clipboard,
@@ -98,8 +97,6 @@ pub enum PasteRung {
     Unicode,
     /// Chunked clipboard paste for terminals.
     Chunked,
-    /// Windows Shift+Insert variant.
-    ShiftInsert,
     /// Refused to inject (secure field / elevated target); left on the clipboard.
     Declined,
 }
@@ -156,7 +153,7 @@ pub enum ShellToSidecar {
     Hello { protocol_version: u32, shell_pid: u32 },
     /// Replace the set of chords the sidecar watches for.
     UpdateShortcuts { bindings: Vec<Binding> },
-    /// Toggle OS-quirk suppression (bare-Fn Globe action on macOS; Win key-up on Windows).
+    /// Toggle OS-quirk suppression (bare-Fn Globe action on macOS).
     SetSuppression {
         suppress_bare_fn: bool,
         swallow_win_keyup: bool,

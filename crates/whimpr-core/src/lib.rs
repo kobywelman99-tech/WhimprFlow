@@ -1,6 +1,6 @@
 //! `whimpr-core` — the platform-agnostic brain of WhimprFlow.
 //!
-//! Everything here is shared verbatim between macOS and Windows. Native concerns
+//! Everything here is platform-agnostic and shared. Native concerns
 //! (the hotkey hook, text injection, accessibility reads) live in the sidecar; the
 //! ASR and cleanup-LLM implementations live in their own crates and plug in behind
 //! the [`asr`] and [`cleanup`] trait seams defined here.
