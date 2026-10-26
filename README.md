@@ -4,17 +4,33 @@ A **local-first voice dictation app for macOS** — hold a key, speak, and clean
 
 > ⚠️ **This is a proof of concept, vibe-coded in a few hours.** It works and the core loop is real, but it is rough and needs a lot of polish, testing, and hardening before it's anything like production quality. Treat it as a starting point, not a finished product.
 
+This is a fork of [Blueturboguy07/WhimprFlow](https://github.com/Blueturboguy07/WhimprFlow). It adds in-app model downloads, an opt-in Parakeet speech engine, Silero VAD silence trimming, per-stage latency in Insights, and a supervised on-device cleanup worker, and it drops Windows support.
+
 ---
 
 ## Platform status
 
-**macOS 14+ only** (developed and tested on Apple Silicon), build-from-source for now. Windows support was removed from the desktop app; the shared crates stay platform-agnostic, so it can be brought back later. An iOS app lives in `ios/`.
+**macOS 14+ on Apple Silicon (M1 or later) only.** Intel Macs aren't supported yet, because the ONNX Runtime used for VAD and Parakeet has no prebuilt Intel library. Windows support was removed from the desktop app; the shared crates stay platform-agnostic, so it can be brought back later. An iOS app lives in `ios/` and is not part of the download.
+
+---
+
+## Install
+
+1. Download the `.dmg` from the [latest release](https://github.com/kobywelman99-tech/WhimprFlow/releases/latest).
+2. Open it and drag **WhimprFlow** into **Applications**.
+3. Open WhimprFlow. macOS blocks it the first time, because the build isn't notarized by Apple. Click **Done**, then go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to WhimprFlow. You only do this once.
+4. Grant **Microphone** and **Accessibility** when the app asks.
+5. During setup, pick the **Fast** speech model and click **Download** (148 MB). You can change models later in Settings. No restart is needed.
+
+Then hold the key, speak, and let go. Text appears wherever your cursor is.
+
+The download doesn't include the offline cleanup worker yet, so cleanup in the download is either off (raw transcript) or cloud cleanup with your own OpenAI or Anthropic key.
 
 ---
 
 ## What's in it
 
-- **On-device ASR** — Whisper (via `whisper.cpp`), running on the GPU. Ships a small English model by default; larger models are auto-preferred if present.
+- **On-device ASR** — Whisper (via `whisper.cpp`), running on the GPU, or Parakeet as an opt-in alternative. Models are downloaded from inside the app, resumable and checksum-verified; larger Whisper models are auto-preferred if present.
 - **Local LLM cleanup** — Qwen3-4B-Instruct (via `llama.cpp`) runs as a separate worker process and cleans the transcript: removes fillers, resolves spoken self-corrections ("meet at 2… no wait, 3" → "3"), applies spoken punctuation, and formats lists/paragraphs. Deterministic gates guard against over-editing, with a raw-transcript fallback.
 - **Optional cloud cleanup** — OpenAI (default) / Anthropic, behind one trait. Keys are stored locally in a user-only file (`0600`), **never in a file**.
 - **Floating pill UI** — a small always-on-top bar showing idle / recording / processing states.
@@ -51,11 +67,13 @@ pnpm --dir ui approve-builds --all
 # Or a signed .app bundle — build ONLY via `tauri build`; a bare `cargo
 # build` + manual codesign will NOT bundle the UI and can drop TCC grants:
 ui/node_modules/.bin/tauri build --bundles app
+# A shareable build without a Developer ID certificate (not notarized):
+scripts/build-macos.sh --adhoc --target aarch64-apple-darwin
 ```
 
-Models are **not** committed (they're multi-GB) — see **[docs/MODELS.md](docs/MODELS.md)**
-for the exact file + download link (short version: `ggml-base.en.bin` is
-required, a Qwen GGUF for local/offline cleanup is optional).
+Models are **not** committed (they're multi-GB). The app downloads the speech
+model itself; **[docs/MODELS.md](docs/MODELS.md)** has the files and links if you
+want to place one by hand, plus the optional Qwen GGUF for local/offline cleanup.
 
 ## Troubleshooting: "I hold the key, speak, and nothing gets typed"
 
@@ -75,9 +93,8 @@ why it looked like nothing was happening at all). If you still hit this:
   WhimprFlow with the **−** button and re-add it (or toggle it off/on), then
   relaunch. WhimprFlow's pill and Hub will now show "Fn key isn't wired up"
   when this happens instead of just doing nothing.
-- **No speech model.** See [docs/MODELS.md](docs/MODELS.md) — dictation needs
-  a Whisper `ggml-*.bin` file placed by hand; the app doesn't download one for
-  you.
+- **No speech model.** Download one in **Settings** (the **Fast** model is the
+  default). To place one by hand instead, see [docs/MODELS.md](docs/MODELS.md).
 - Still stuck? Run the app from a terminal (`./dev.sh`) and hold the key once — every failure
   path also logs a `[whimpr]`-prefixed line explaining what happened.
 

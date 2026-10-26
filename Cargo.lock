@@ -5686,7 +5686,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-asr"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "hound",
@@ -5696,7 +5696,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-asr-parakeet"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "transcribe-rs",
@@ -5706,7 +5706,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-audio"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cpal",
@@ -5714,7 +5714,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-cleanup"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
@@ -5726,7 +5726,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-core"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -5739,7 +5739,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-eval"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "hound",
@@ -5755,7 +5755,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-ffi"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "thiserror 1.0.69",
  "uniffi",
@@ -5764,7 +5764,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-ipc"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5773,7 +5773,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-llm-worker"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "llama-cpp-2",
@@ -5783,7 +5783,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-models"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -5794,11 +5794,11 @@ dependencies = [
 
 [[package]]
 name = "whimpr-sidecar"
-version = "0.1.1"
+version = "0.3.0"
 
 [[package]]
 name = "whimpr-tauri"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5824,7 +5824,7 @@ dependencies = [
 
 [[package]]
 name = "whimpr-vad"
-version = "0.1.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "hound",

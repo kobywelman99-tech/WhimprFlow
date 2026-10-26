@@ -19,7 +19,7 @@ Plan: [plan.md](plan.md). The iOS work has its own list in [../todo.md](../todo.
 - [ ] Koby confirms dictation works in the built app
 
 ## Phase 2: Make the repo his
-- [ ] Task 3: README install section, upstream credit, model text fixed, version 0.3.0
+- [x] Task 3: README install section, upstream credit, model text fixed, version 0.3.0 (`Cargo.toml` workspace, `tauri.conf.json`, `ui/package.json`, `Cargo.lock`). README states Apple Silicon only and that the offline cleanup worker isn't in the download yet
 - [ ] Task 4: `origin` → `upstream`, create the public repo, push `ios-app` as `main`
 
 ## Checkpoint B
