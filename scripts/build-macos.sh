@@ -28,40 +28,54 @@
 #                           an app-specific password. Required for Tauri's own
 #                           pass, which cannot read a keychain profile.
 #
-# Usage: scripts/build-macos.sh [--target <triple>] [--skip-notarize]
+# --adhoc signs with no certificate at all ("-") and skips notarization. For a
+# build shared without a Developer ID: Gatekeeper blocks it on first open, and
+# the user has to allow it once in System Settings → Privacy & Security →
+# Open Anyway. It is a deliberate opt-in, never the default.
+#
+# Usage: scripts/build-macos.sh [--target <triple>] [--skip-notarize] [--adhoc]
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$PWD"
 TARGET=""
 SKIP_NOTARIZE=0
+ADHOC=0
 DEFAULT_IDENTITY="Developer ID Application: Mann Bellani (R5R3ZS54LV)"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --target) TARGET="$2"; shift 2 ;;
     --skip-notarize) SKIP_NOTARIZE=1; shift ;;
+    --adhoc) ADHOC=1; SKIP_NOTARIZE=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-IDENTITY="${APPLE_SIGNING_IDENTITY:-$DEFAULT_IDENTITY}"
+if [ "$ADHOC" = "1" ]; then
+  IDENTITY="-"
+  echo "==> Ad-hoc build: not signed with a certificate, not notarized." >&2
+  echo "    The first open needs System Settings → Privacy & Security → Open Anyway." >&2
+else
+  IDENTITY="${APPLE_SIGNING_IDENTITY:-$DEFAULT_IDENTITY}"
 
-# A development certificate signs cleanly and is still refused by Gatekeeper.
-# Catching that here costs a second; catching it in a bug report costs a user.
-case "$IDENTITY" in
-  "Developer ID Application:"*) ;;
-  *)
-    echo "Refusing to build: '$IDENTITY' is not a Developer ID Application identity." >&2
-    echo "That is exactly what shipped in v0.1.0 and could not be opened." >&2
+  # A development certificate signs cleanly and is still refused by Gatekeeper.
+  # Catching that here costs a second; catching it in a bug report costs a user.
+  case "$IDENTITY" in
+    "Developer ID Application:"*) ;;
+    *)
+      echo "Refusing to build: '$IDENTITY' is not a Developer ID Application identity." >&2
+      echo "That is exactly what shipped in v0.1.0 and could not be opened." >&2
+      echo "To share a build without one, pass --adhoc." >&2
+      exit 1
+      ;;
+  esac
+
+  if ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
+    echo "No such identity in the keychain: $IDENTITY" >&2
+    security find-identity -v -p codesigning >&2
     exit 1
-    ;;
-esac
-
-if ! security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
-  echo "No such identity in the keychain: $IDENTITY" >&2
-  security find-identity -v -p codesigning >&2
-  exit 1
+  fi
 fi
 
 TAURI="$REPO_ROOT/ui/node_modules/.bin/tauri"
