@@ -111,6 +111,11 @@ export APPLE_SIGNING_IDENTITY="$IDENTITY"
 
 BUILD_ARGS=(build)
 [ -n "$TARGET" ] && BUILD_ARGS+=(--target "$TARGET")
+# Tauri's bundle_dmg.sh styles the window by scripting Finder, which fails when
+# the shell has no Automation permission (an agent, CI, ssh) and leaves its
+# scratch image mounted. An ad-hoc build only needs the app from Tauri; the dmg
+# is packed below with hdiutil, the same way the notarized path repacks it.
+[ "$ADHOC" = "1" ] && BUILD_ARGS+=(--bundles app)
 
 cd "$REPO_ROOT/src-tauri"
 "$TAURI" "${BUILD_ARGS[@]}"
@@ -121,6 +126,29 @@ APP="$TARGET_DIR/release/bundle/macos/WhimprFlow.app"
 DMG="$(/usr/bin/find "$TARGET_DIR/release/bundle/dmg" -name "*.dmg" -print -quit 2>/dev/null || true)"
 
 [ -d "$APP" ] || { echo "No WhimprFlow.app was produced." >&2; exit 1; }
+
+# Packs $APP into $DMG with an Applications link to drag onto.
+pack_dmg() {
+  STAGE="$(mktemp -d)"
+  cp -R "$APP" "$STAGE/WhimprFlow.app"
+  ln -s /Applications "$STAGE/Applications"
+  rm -f "$DMG"
+  hdiutil create -volname "WhimprFlow" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+  rm -rf "$STAGE"
+}
+
+if [ "$ADHOC" = "1" ]; then
+  # Named the way Tauri names it, so a leftover dmg from an older version is
+  # never the one that gets picked up and shipped.
+  VERSION="$(sed -n 's/^  "version": "\(.*\)",$/\1/p' "$REPO_ROOT/src-tauri/tauri.conf.json")"
+  ARCH="${TARGET%%-*}"
+  [ -n "$ARCH" ] || ARCH="$(uname -m | sed 's/^arm64$/aarch64/')"
+  mkdir -p "$TARGET_DIR/release/bundle/dmg"
+  rm -f "$TARGET_DIR/release/bundle/dmg/"*.dmg
+  DMG="$TARGET_DIR/release/bundle/dmg/WhimprFlow_${VERSION}_${ARCH}.dmg"
+  echo "==> Packing $(basename "$DMG")"
+  pack_dmg
+fi
 
 if [ "$NOTARIZE" = "1" ]; then
   # The app first. Submitting it on its own means its ticket exists before the
@@ -139,12 +167,7 @@ if [ "$NOTARIZE" = "1" ]; then
   # the network to validate.
   if [ -n "$DMG" ]; then
     echo "==> Rebuilding the dmg around the stapled app"
-    STAGE="$(mktemp -d)"
-    cp -R "$APP" "$STAGE/WhimprFlow.app"
-    ln -s /Applications "$STAGE/Applications"
-    rm -f "$DMG"
-    hdiutil create -volname "WhimprFlow" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
-    rm -rf "$STAGE"
+    pack_dmg
 
     codesign --force --sign "$IDENTITY" --timestamp "$DMG"
     echo "==> Notarizing the disk image itself"
