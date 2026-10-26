@@ -26,7 +26,7 @@ Plan: [plan.md](plan.md). The iOS work has its own list in [../todo.md](../todo.
 - [ ] Koby has reviewed the public repo page
 
 ## Phase 3: Downloadable
-- [ ] Task 5: Release v0.3.0 with the dmg and notes
+- [x] Task 5: Released v0.3.0 (tag → `504cf1f`) with `WhimprFlow_0.3.0_aarch64.dmg`. `--adhoc` now packs its own dmg (Tauri's `bundle_dmg.sh` needs Finder Automation). `releases/latest` resolves to v0.3.0, and a public download matches SHA-256 `be4885c8…f521ec`
 - [ ] Task 6: Fresh download installs and dictates, friend message drafted
 
 ## Checkpoint C
