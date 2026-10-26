@@ -20,7 +20,7 @@ Plan: [plan.md](plan.md). The iOS work has its own list in [../todo.md](../todo.
 
 ## Phase 2: Make the repo his
 - [x] Task 3: README install section, upstream credit, model text fixed, version 0.3.0 (`Cargo.toml` workspace, `tauri.conf.json`, `ui/package.json`, `Cargo.lock`). README states Apple Silicon only and that the offline cleanup worker isn't in the download yet
-- [ ] Task 4: `origin` → `upstream`, create the public repo, push `ios-app` as `main`
+- [x] Task 4: `origin` → `upstream`, created public `kobywelman99-tech/WhimprFlow`, pushed `ios-app` as `main` (old local `main` renamed `upstream-main`). Verified PUBLIC, default `main`, only `main` on the remote, readable logged out
 
 ## Checkpoint B
 - [ ] Koby has reviewed the public repo page
